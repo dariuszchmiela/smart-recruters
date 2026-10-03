@@ -7,34 +7,38 @@ import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateReq
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
 import com.dch.smartrecruters.validation.CandidateValidator;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.*;
 
 class CandidateMigrationServiceTest {
 
-    @Test
-    void shouldMigrateCandidateFromSapToSmartRecruiters() {
-        SapClient sapClient = mock(SapClient.class);
-        SmartRecruitersClient smartRecruitersClient = mock(SmartRecruitersClient.class);
-        MigrationRecordRepository migrationRecordRepository =
-                mock(MigrationRecordRepository.class);
+    private SapClient sapClient;
+    private SmartRecruitersClient smartRecruitersClient;
+    private MigrationRecordRepository migrationRecordRepository;
 
-        CandidateMigrationService service = new CandidateMigrationService(
+    private CandidateMigrationService service;
+
+    @BeforeEach
+    void setUp() {
+        sapClient = mock(SapClient.class);
+        smartRecruitersClient = mock(SmartRecruitersClient.class);
+        migrationRecordRepository = mock(MigrationRecordRepository.class);
+
+        service = new CandidateMigrationService(
                 sapClient,
                 new CandidateMapper(),
                 new CandidateValidator(),
                 smartRecruitersClient,
                 migrationRecordRepository
         );
+    }
 
-        SapCandidate source = new SapCandidate(
-                "candidate-1",
-                "tenant-1",
-                "John",
-                "Smith",
-                "john@example.com"
-        );
+    @Test
+    void shouldMigrateCandidateFromSapToSmartRecruiters() {
+        SapCandidate source = candidate();
 
         when(migrationRecordRepository.tryStart("tenant-1", "candidate-1"))
                 .thenReturn(true);
@@ -56,5 +60,47 @@ class CandidateMigrationServiceTest {
 
         verify(migrationRecordRepository)
                 .markCompleted("tenant-1", "candidate-1");
+    }
+
+    @Test
+    void shouldSkipCandidateWhenMigrationWasAlreadyStarted() {
+        when(migrationRecordRepository.tryStart("tenant-1", "candidate-1"))
+                .thenReturn(false);
+
+        service.migrateCandidate("tenant-1", "candidate-1");
+
+        verifyNoInteractions(sapClient);
+        verifyNoInteractions(smartRecruitersClient);
+    }
+
+    @Test
+    void shouldMarkMigrationAsFailedWhenTargetCallFails() {
+        when(migrationRecordRepository.tryStart("tenant-1", "candidate-1"))
+                .thenReturn(true);
+
+        when(sapClient.getCandidate("tenant-1", "candidate-1"))
+                .thenReturn(candidate());
+
+        doThrow(new RuntimeException("Target unavailable"))
+                .when(smartRecruitersClient)
+                .createCandidate(anyString(), any());
+
+        assertThrows(
+                RuntimeException.class,
+                () -> service.migrateCandidate("tenant-1", "candidate-1")
+        );
+
+        verify(migrationRecordRepository)
+                .markFailed("tenant-1", "candidate-1");
+    }
+
+    private SapCandidate candidate() {
+        return new SapCandidate(
+                "candidate-1",
+                "tenant-1",
+                "John",
+                "Smith",
+                "john@example.com"
+        );
     }
 }
