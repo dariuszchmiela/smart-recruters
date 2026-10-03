@@ -1,8 +1,7 @@
 package com.dch.smartrecruters.client;
 
-import com.dch.smartrecruters.domain.Candidate;
+import com.dch.smartrecruters.client.sap.SapCandidate;
 
 public interface SapClient {
 
-    Candidate getCandidate(String tenantId, String candidateId);
-}
+    SapCandidate getCandidate(String tenantId, String candidateId);}
