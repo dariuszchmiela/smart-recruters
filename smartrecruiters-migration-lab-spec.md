@@ -2,16 +2,16 @@
 
 ## 1. Cel projektu
 
-Zbudować praktyczny system migracyjny odwzorowujący case rekrutacyjny:
+Projekt bada projektowanie i implementację odpornej platformy migracji danych enterprise na przykładzie migracji systemu ATS (Applicant Tracking System):
 
 **SAP / Legacy Recruiting System → Migration Platform → SmartRecruiters**
 
-Projekt ma służyć jednocześnie do:
-- nauki System Design,
-- ćwiczenia Code Review,
-- praktyki Java / Spring Boot / Kafka / PostgreSQL,
-- ćwiczenia transakcji, idempotency, retry, resilience i testów,
-- przygotowania do rozmowy senior backend / SmartRecruiters.
+Zakres techniczny:
+- architektura platformy migracyjnej (system design),
+- Java / Spring Boot / Kafka / PostgreSQL,
+- transakcje, idempotency, retry, resilience,
+- współbieżność i stan migracji,
+- strategia testów.
 
 ---
 
@@ -900,31 +900,29 @@ Gdy to działa end-to-end, dokładamy stan migracji i kolejne mechanizmy.
 
 ---
 
-## 26. Zasady pracy nad projektem
+## 26. Zasady rozwoju projektu
 
-- jeden krok naraz,
-- użytkownik pisze kod sam,
-- nie wklejamy całych dużych plików bez potrzeby,
+- małe, inkrementalne kroki,
 - najpierw prosty working flow,
 - potem resilience i concurrency,
-- po każdym etapie code review,
+- review kodu po każdym etapie,
 - Java najpierw,
 - potem wybrane elementy przepisujemy / porównujemy z Kotlinem,
-- każdy mechanizm tłumaczymy: co, dlaczego, trade-off, failure scenario.
+- każdy mechanizm dokumentujemy: co, dlaczego, trade-off, failure scenario.
 
 ---
 
-## 27. Cel końcowy
+## 27. Kluczowe zagadnienia inżynierskie
 
-Po ukończeniu projektu użytkownik powinien umieć:
+Projekt obejmuje:
 
-1. Narysować architekturę migracji.
-2. Wyjaśnić batch + delta.
-3. Wyjaśnić Kafka topics / partitions / consumer groups.
-4. Wyjaśnić idempotency i at-least-once.
-5. Zaprojektować retry / DLQ / circuit breaker.
-6. Wyjaśnić transakcje DB vs external API.
-7. Zaprojektować restartable migration.
-8. Rozpoznać N+1, race condition i transaction pitfalls.
-9. Wyjaśnić multi-tenancy i PII security.
-10. Zrobić senior-level Code Review implementacji.
+1. Architekturę platformy migracyjnej.
+2. Batch + delta synchronization.
+3. Kafka topics / partitions / consumer groups.
+4. Idempotency i at-least-once delivery.
+5. Retry / DLQ / circuit breaker.
+6. Transakcje DB vs wywołania external API.
+7. Restartable migration.
+8. N+1, race conditions i transaction pitfalls.
+9. Multi-tenancy i bezpieczeństwo PII.
+10. Jakość implementacji weryfikowaną przez code review.
