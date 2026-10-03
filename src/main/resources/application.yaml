@@ -1,3 +1,10 @@
 spring:
   application:
     name: smart-recruters
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:migration}
+    username: ${DB_USERNAME:migration}
+    password: ${DB_PASSWORD:migration}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
