@@ -29,5 +29,6 @@ public class CandidateMigrationService {
     public void migrateCandidate(String tenantId, String candidateId) {
         SapCandidate source = sapClient.getCandidate(tenantId, candidateId);
         Candidate candidate = mapper.map(source);
+        validator.validate(candidate);
     }
 }
