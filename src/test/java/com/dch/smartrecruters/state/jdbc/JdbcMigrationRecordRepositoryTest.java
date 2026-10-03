@@ -2,14 +2,15 @@ package com.dch.smartrecruters.state.jdbc;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -17,35 +18,35 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Lightweight check of the claim statement and its result mapping.
- * Real concurrency semantics of ON CONFLICT need PostgreSQL and are not tested here.
+ * Fast check of parameter binding and result mapping (runs without Docker).
+ * SQL semantics and concurrency are covered by {@link JdbcMigrationRecordRepositoryIntegrationTest}.
  */
 class JdbcMigrationRecordRepositoryTest {
 
     private PreparedStatement statement;
-    private Connection connection;
     private JdbcMigrationRecordRepository repository;
 
     @BeforeEach
     void setUp() throws SQLException {
         DataSource dataSource = mock(DataSource.class);
-        connection = mock(Connection.class);
+        Connection connection = mock(Connection.class);
         statement = mock(PreparedStatement.class);
 
         when(dataSource.getConnection()).thenReturn(connection);
         when(connection.prepareStatement(anyString())).thenReturn(statement);
 
-        repository = new JdbcMigrationRecordRepository(dataSource);
+        repository = new JdbcMigrationRecordRepository(dataSource, Duration.ofMinutes(5));
     }
 
     @Test
-    void shouldClaimWhenStatementInsertedOrReclaimedRow() throws SQLException {
+    void shouldClaimWhenStatementChangedRowAndBindClaimTimeout() throws SQLException {
         when(statement.executeUpdate()).thenReturn(1);
 
         assertTrue(repository.tryStart("tenant-1", "candidate-1"));
 
         verify(statement).setString(1, "tenant-1");
         verify(statement).setString(2, "candidate-1");
+        verify(statement).setLong(3, Duration.ofMinutes(5).toMillis());
     }
 
     @Test
@@ -56,16 +57,12 @@ class JdbcMigrationRecordRepositoryTest {
     }
 
     @Test
-    void shouldReclaimOnlyFailedRecordsInSingleStatement() throws SQLException {
-        when(statement.executeUpdate()).thenReturn(1);
+    void shouldRejectNonPositiveClaimTimeout() {
+        DataSource dataSource = mock(DataSource.class);
 
-        repository.tryStart("tenant-1", "candidate-1");
-
-        ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-        verify(connection).prepareStatement(sql.capture());
-        String normalized = sql.getValue().replaceAll("\\s+", " ");
-
-        assertTrue(normalized.contains("ON CONFLICT (tenant_id, source_record_id) DO UPDATE SET status = 'IN_PROGRESS'"));
-        assertTrue(normalized.contains("WHERE candidate_migration.status = 'FAILED'"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new JdbcMigrationRecordRepository(dataSource, Duration.ZERO));
+        assertThrows(IllegalArgumentException.class,
+                () -> new JdbcMigrationRecordRepository(dataSource, null));
     }
 }

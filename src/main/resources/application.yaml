@@ -9,6 +9,10 @@ spring:
     enabled: true
     locations: classpath:db/migration
 
+migration:
+  # IN_PROGRESS older than this is treated as abandoned (dead worker) and can be claimed again
+  claim-timeout: ${MIGRATION_CLAIM_TIMEOUT:5m}
+
 clients:
   sap:
     base-url: ${SAP_BASE_URL:http://localhost:8081}
