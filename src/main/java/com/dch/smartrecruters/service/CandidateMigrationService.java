@@ -2,6 +2,7 @@ package com.dch.smartrecruters.service;
 
 import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
+import com.dch.smartrecruters.client.sap.SapCandidate;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.validation.CandidateValidator;
 
@@ -22,5 +23,9 @@ public class CandidateMigrationService {
         this.mapper = mapper;
         this.validator = validator;
         this.smartRecruitersClient = smartRecruitersClient;
+    }
+
+    public void migrateCandidate(String tenantId, String candidateId) {
+        SapCandidate source = sapClient.getCandidate(tenantId, candidateId);
     }
 }
