@@ -3,6 +3,7 @@ package com.dch.smartrecruters.service;
 import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
 import com.dch.smartrecruters.client.sap.SapCandidate;
+import com.dch.smartrecruters.domain.Candidate;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.validation.CandidateValidator;
 
@@ -27,5 +28,6 @@ public class CandidateMigrationService {
 
     public void migrateCandidate(String tenantId, String candidateId) {
         SapCandidate source = sapClient.getCandidate(tenantId, candidateId);
+        Candidate candidate = mapper.map(source);
     }
 }
