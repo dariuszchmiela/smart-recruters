@@ -4,4 +4,5 @@ import com.dch.smartrecruters.client.sap.SapCandidate;
 
 public interface SapClient {
 
-    SapCandidate getCandidate(String tenantId, String candidateId);}
+    SapCandidate getCandidate(String tenantId, String candidateId);
+}
