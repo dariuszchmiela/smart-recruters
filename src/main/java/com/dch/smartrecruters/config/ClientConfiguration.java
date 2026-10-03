@@ -5,6 +5,9 @@ import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
 import com.dch.smartrecruters.client.sap.RestSapClient;
 import com.dch.smartrecruters.client.smartrecruiters.RestSmartRecruitersClient;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
 import org.springframework.boot.http.client.HttpClientSettings;
@@ -12,19 +15,18 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
 
+import java.time.Clock;
+
 @Configuration
 @EnableConfigurationProperties(ClientProperties.class)
 public class ClientConfiguration {
 
+    public static final String SAP = "sap";
+    public static final String SMARTRECRUITERS = "smartrecruiters";
+
     @Bean
-    public ExternalCallExecutor externalCallExecutor(ClientProperties properties) {
-        ClientProperties.Retry retry = properties.retry();
-        return new ExternalCallExecutor(
-                retry.maxAttempts(),
-                retry.initialBackoff(),
-                retry.multiplier(),
-                retry.maxBackoff()
-        );
+    public CircuitBreakerRegistry circuitBreakerRegistry(ClientProperties properties) {
+        return CircuitBreakerRegistry.of(circuitBreakerConfig(properties.circuitBreaker(), Clock.systemUTC()));
     }
 
     @Bean
@@ -32,11 +34,11 @@ public class ClientConfiguration {
             RestClient.Builder builder,
             ClientHttpRequestFactoryBuilder<?> requestFactoryBuilder,
             ClientProperties properties,
-            ExternalCallExecutor executor
+            CircuitBreakerRegistry circuitBreakerRegistry
     ) {
         return new RestSapClient(
                 restClient(builder, requestFactoryBuilder, properties.sap()),
-                executor
+                callExecutor(circuitBreakerRegistry.circuitBreaker(SAP), properties.retry())
         );
     }
 
@@ -45,11 +47,38 @@ public class ClientConfiguration {
             RestClient.Builder builder,
             ClientHttpRequestFactoryBuilder<?> requestFactoryBuilder,
             ClientProperties properties,
-            ExternalCallExecutor executor
+            CircuitBreakerRegistry circuitBreakerRegistry
     ) {
         return new RestSmartRecruitersClient(
                 restClient(builder, requestFactoryBuilder, properties.smartrecruiters()),
-                executor
+                callExecutor(circuitBreakerRegistry.circuitBreaker(SMARTRECRUITERS), properties.retry())
+        );
+    }
+
+    static CircuitBreakerConfig circuitBreakerConfig(
+            ClientProperties.CircuitBreakerSettings settings,
+            Clock clock
+    ) {
+        return CircuitBreakerConfig.custom()
+                .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                .slidingWindowSize(settings.slidingWindowSize())
+                .minimumNumberOfCalls(settings.minimumNumberOfCalls())
+                .failureRateThreshold(settings.failureRateThreshold())
+                .waitDurationInOpenState(settings.waitDurationInOpenState())
+                .permittedNumberOfCallsInHalfOpenState(settings.permittedCallsInHalfOpenState())
+                // only TRANSIENT failures count; PERMANENT ones mean the upstream did respond
+                .recordException(ExternalCallExecutor::isTransientFailure)
+                .clock(clock)
+                .build();
+    }
+
+    static ExternalCallExecutor callExecutor(CircuitBreaker circuitBreaker, ClientProperties.Retry retry) {
+        return new ExternalCallExecutor(
+                circuitBreaker,
+                retry.maxAttempts(),
+                retry.initialBackoff(),
+                retry.multiplier(),
+                retry.maxBackoff()
         );
     }
 

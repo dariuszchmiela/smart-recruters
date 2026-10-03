@@ -1,5 +1,6 @@
 package com.dch.smartrecruters.client.sap;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import com.dch.smartrecruters.client.ExternalCallExecutor;
 import com.dch.smartrecruters.client.ExternalSystemException;
 import com.dch.smartrecruters.client.FailureType;
@@ -47,7 +48,7 @@ class RestSapClientTest {
         server = MockRestServiceServer.bindTo(builder).build();
         client = new RestSapClient(
                 builder.build(),
-                new ExternalCallExecutor(3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
+                new ExternalCallExecutor(CircuitBreaker.ofDefaults("test"), 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
         );
     }
 

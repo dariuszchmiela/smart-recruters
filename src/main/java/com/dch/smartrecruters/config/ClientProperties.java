@@ -8,7 +8,8 @@ import java.time.Duration;
 public record ClientProperties(
         Endpoint sap,
         Endpoint smartrecruiters,
-        Retry retry
+        Retry retry,
+        CircuitBreakerSettings circuitBreaker
 ) {
 
     public record Endpoint(
@@ -23,6 +24,18 @@ public record ClientProperties(
             Duration initialBackoff,
             double multiplier,
             Duration maxBackoff
+    ) {
+    }
+
+    /**
+     * Shared settings; every external system gets its own circuit breaker instance and state.
+     */
+    public record CircuitBreakerSettings(
+            int slidingWindowSize,
+            int minimumNumberOfCalls,
+            float failureRateThreshold,
+            Duration waitDurationInOpenState,
+            int permittedCallsInHalfOpenState
     ) {
     }
 }

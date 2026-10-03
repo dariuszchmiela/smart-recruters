@@ -1,5 +1,6 @@
 package com.dch.smartrecruters.service;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import com.dch.smartrecruters.client.ExternalCallExecutor;
 import com.dch.smartrecruters.client.ExternalSystemException;
 import com.dch.smartrecruters.client.FailureType;
@@ -46,7 +47,7 @@ class CandidateMigrationResilienceTest {
     @BeforeEach
     void setUp() {
         ExternalCallExecutor executor =
-                new ExternalCallExecutor(3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5));
+                new ExternalCallExecutor(CircuitBreaker.ofDefaults("test"), 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5));
 
         RestClient.Builder sapBuilder = RestClient.builder().baseUrl("http://sap.test");
         sap = MockRestServiceServer.bindTo(sapBuilder).build();
@@ -118,6 +119,41 @@ class CandidateMigrationResilienceTest {
         sap.verify();
         smartRecruiters.verify();
         verify(migrationRecordRepository).markFailed("tenant-1", "candidate-1");
+    }
+
+    @Test
+    void shouldMarkFailedWithoutHttpWhenSourceCircuitBreakerIsOpen() {
+        CircuitBreaker openSapBreaker = CircuitBreaker.ofDefaults("sap");
+        openSapBreaker.transitionToOpenState();
+
+        RestClient.Builder sapBuilder = RestClient.builder().baseUrl("http://sap.test");
+        MockRestServiceServer sapServer = MockRestServiceServer.bindTo(sapBuilder).build();
+        sapServer.expect(ExpectedCount.never(), requestTo(SAP_URL));
+        smartRecruiters.expect(ExpectedCount.never(), requestTo(SR_URL));
+
+        CandidateMigrationService serviceWithOpenSap = new CandidateMigrationService(
+                new RestSapClient(
+                        sapBuilder.build(),
+                        new ExternalCallExecutor(openSapBreaker, 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
+                ),
+                new CandidateMapper(),
+                new CandidateValidator(),
+                new RestSmartRecruitersClient(
+                        RestClient.builder().baseUrl("http://sr.test").build(),
+                        new ExternalCallExecutor(CircuitBreaker.ofDefaults("sr"), 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
+                ),
+                migrationRecordRepository
+        );
+
+        ExternalSystemException exception = assertThrows(
+                ExternalSystemException.class,
+                () -> serviceWithOpenSap.migrateCandidate("tenant-1", "candidate-1")
+        );
+
+        assertEquals(FailureType.TRANSIENT, exception.failureType());
+        sapServer.verify();
+        verify(migrationRecordRepository).markFailed("tenant-1", "candidate-1");
+        verify(migrationRecordRepository, never()).markCompleted("tenant-1", "candidate-1");
     }
 
     private String sapCandidate() {

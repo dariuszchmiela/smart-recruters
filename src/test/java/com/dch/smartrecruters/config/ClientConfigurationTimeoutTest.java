@@ -1,6 +1,5 @@
 package com.dch.smartrecruters.config;
 
-import com.dch.smartrecruters.client.ExternalCallExecutor;
 import com.dch.smartrecruters.client.ExternalSystemException;
 import com.dch.smartrecruters.client.FailureType;
 import com.dch.smartrecruters.client.SapClient;
@@ -56,16 +55,16 @@ class ClientConfigurationTimeoutTest {
         ClientProperties properties = new ClientProperties(
                 new ClientProperties.Endpoint(baseUrl, Duration.ofMillis(500), Duration.ofMillis(100)),
                 new ClientProperties.Endpoint(baseUrl, Duration.ofMillis(500), Duration.ofMillis(100)),
-                new ClientProperties.Retry(2, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
+                new ClientProperties.Retry(2, Duration.ofMillis(1), 2.0, Duration.ofMillis(5)),
+                new ClientProperties.CircuitBreakerSettings(10, 5, 50, Duration.ofSeconds(30), 2)
         );
         ClientConfiguration configuration = new ClientConfiguration();
-        ExternalCallExecutor executor = configuration.externalCallExecutor(properties);
 
         SapClient sapClient = configuration.sapClient(
                 RestClient.builder(),
                 ClientHttpRequestFactoryBuilder.detect(),
                 properties,
-                executor
+                configuration.circuitBreakerRegistry(properties)
         );
 
         ExternalSystemException exception = assertThrows(

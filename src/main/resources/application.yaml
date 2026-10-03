@@ -27,3 +27,9 @@ clients:
     initial-backoff: ${HTTP_RETRY_INITIAL_BACKOFF:200ms}
     multiplier: ${HTTP_RETRY_MULTIPLIER:2.0}
     max-backoff: ${HTTP_RETRY_MAX_BACKOFF:2s}
+  circuit-breaker:
+    sliding-window-size: ${HTTP_CIRCUIT_BREAKER_SLIDING_WINDOW_SIZE:10}
+    minimum-number-of-calls: ${HTTP_CIRCUIT_BREAKER_MINIMUM_NUMBER_OF_CALLS:5}
+    failure-rate-threshold: ${HTTP_CIRCUIT_BREAKER_FAILURE_RATE_THRESHOLD:50}
+    wait-duration-in-open-state: ${HTTP_CIRCUIT_BREAKER_WAIT_DURATION_IN_OPEN_STATE:30s}
+    permitted-calls-in-half-open-state: ${HTTP_CIRCUIT_BREAKER_PERMITTED_CALLS_IN_HALF_OPEN_STATE:2}
