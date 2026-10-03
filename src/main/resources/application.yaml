@@ -12,5 +12,14 @@ spring:
 clients:
   sap:
     base-url: ${SAP_BASE_URL:http://localhost:8081}
+    connect-timeout: ${SAP_CONNECT_TIMEOUT:1s}
+    read-timeout: ${SAP_READ_TIMEOUT:3s}
   smartrecruiters:
     base-url: ${SMARTRECRUITERS_BASE_URL:http://localhost:8082}
+    connect-timeout: ${SMARTRECRUITERS_CONNECT_TIMEOUT:1s}
+    read-timeout: ${SMARTRECRUITERS_READ_TIMEOUT:3s}
+  retry:
+    max-attempts: ${HTTP_RETRY_MAX_ATTEMPTS:3}
+    initial-backoff: ${HTTP_RETRY_INITIAL_BACKOFF:200ms}
+    multiplier: ${HTTP_RETRY_MULTIPLIER:2.0}
+    max-backoff: ${HTTP_RETRY_MAX_BACKOFF:2s}

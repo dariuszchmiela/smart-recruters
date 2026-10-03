@@ -2,27 +2,40 @@ package com.dch.sapstub;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.time.Duration;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class SapCandidateControllerTest {
 
+    private static final String CANDIDATE_1 = "/api/tenants/tenant-1/candidates/candidate-1";
+
+    private FailureSimulator failureSimulator;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
+        failureSimulator = new FailureSimulator();
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new SapCandidateController(new SapCandidateStore()))
+                .standaloneSetup(
+                        new SapCandidateController(new SapCandidateStore(), failureSimulator),
+                        new FailureController(failureSimulator)
+                )
                 .build();
     }
 
     @Test
     void shouldReturnExistingCandidate() throws Exception {
-        mockMvc.perform(get("/api/tenants/tenant-1/candidates/candidate-1"))
+        mockMvc.perform(get(CANDIDATE_1))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value("candidate-1"))
                 .andExpect(jsonPath("$.tenantId").value("tenant-1"))
@@ -49,5 +62,51 @@ class SapCandidateControllerTest {
     void shouldReturnNotFoundForCandidateOfOtherTenant() throws Exception {
         mockMvc.perform(get("/api/tenants/tenant-3/candidates/candidate-1"))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void shouldReturnServiceUnavailableForScheduledNumberOfRequests() throws Exception {
+        mockMvc.perform(post("/admin/failures")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"mode": "UNAVAILABLE", "count": 2}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.remaining").value(2));
+
+        mockMvc.perform(get(CANDIDATE_1)).andExpect(status().isServiceUnavailable());
+        mockMvc.perform(get(CANDIDATE_1)).andExpect(status().isServiceUnavailable());
+        mockMvc.perform(get(CANDIDATE_1)).andExpect(status().isOk());
+    }
+
+    @Test
+    void shouldDelayResponse() throws Exception {
+        failureSimulator.schedule(FailureMode.DELAY, 1, Duration.ofMillis(100));
+
+        long start = System.nanoTime();
+        mockMvc.perform(get(CANDIDATE_1)).andExpect(status().isOk());
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - start).toMillis();
+
+        assertTrue(elapsedMillis >= 100, "expected delay, was " + elapsedMillis + " ms");
+    }
+
+    @Test
+    void shouldResetScheduledFailures() throws Exception {
+        failureSimulator.schedule(FailureMode.UNAVAILABLE, 5, Duration.ZERO);
+
+        mockMvc.perform(delete("/admin/failures")).andExpect(status().isNoContent());
+
+        mockMvc.perform(get(CANDIDATE_1)).andExpect(status().isOk());
+        mockMvc.perform(get("/admin/failures")).andExpect(status().isNotFound());
+    }
+
+    @Test
+    void shouldRejectInvalidFailureRequest() throws Exception {
+        mockMvc.perform(post("/admin/failures")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"mode": "UNAVAILABLE", "count": 0}
+                                """))
+                .andExpect(status().isBadRequest());
     }
 }

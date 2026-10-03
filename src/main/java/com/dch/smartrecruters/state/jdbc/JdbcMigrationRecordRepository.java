@@ -16,6 +16,11 @@ public class JdbcMigrationRecordRepository implements MigrationRecordRepository 
         this.dataSource = dataSource;
     }
 
+    /**
+     * Claims the record in a single atomic statement:
+     * no row -> insert IN_PROGRESS, FAILED -> IN_PROGRESS, IN_PROGRESS / COMPLETED -> no change.
+     * Returns true only for the worker whose statement changed a row.
+     */
     @Override
     public boolean tryStart(String tenantId, String sourceRecordId) {
         String sql = """
@@ -26,7 +31,8 @@ public class JdbcMigrationRecordRepository implements MigrationRecordRepository 
                 )
                 VALUES (?, ?, 'IN_PROGRESS')
                 ON CONFLICT (tenant_id, source_record_id)
-                DO NOTHING
+                DO UPDATE SET status = 'IN_PROGRESS'
+                WHERE candidate_migration.status = 'FAILED'
                 """;
 
         try (

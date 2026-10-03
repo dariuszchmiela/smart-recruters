@@ -1,5 +1,8 @@
 package com.dch.smartrecruters.client.smartrecruiters;
 
+import com.dch.smartrecruters.client.ExternalCallExecutor;
+import com.dch.smartrecruters.client.ExternalSystemException;
+import com.dch.smartrecruters.client.FailureType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
@@ -8,12 +11,23 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.time.Duration;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.springframework.test.web.client.ExpectedCount.once;
+import static org.springframework.test.web.client.ExpectedCount.times;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 
 class RestSmartRecruitersClientTest {
+
+    private static final String URL = "http://sr.test/api/tenants/tenant-1/candidates";
+
+    private static final SmartRecruitersCandidateRequest REQUEST =
+            new SmartRecruitersCandidateRequest("candidate-1", "John", "Smith", "john@example.com");
 
     private MockRestServiceServer server;
     private RestSmartRecruitersClient client;
@@ -22,12 +36,15 @@ class RestSmartRecruitersClientTest {
     void setUp() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://sr.test");
         server = MockRestServiceServer.bindTo(builder).build();
-        client = new RestSmartRecruitersClient(builder.build());
+        client = new RestSmartRecruitersClient(
+                builder.build(),
+                new ExternalCallExecutor(3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))
+        );
     }
 
     @Test
     void shouldPostCandidateToTenantEndpoint() {
-        server.expect(requestTo("http://sr.test/api/tenants/tenant-1/candidates"))
+        server.expect(requestTo(URL))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
                 .andExpect(content().json("""
@@ -40,11 +57,37 @@ class RestSmartRecruitersClientTest {
                         """))
                 .andRespond(withStatus(HttpStatus.CREATED));
 
-        client.createCandidate(
-                "tenant-1",
-                new SmartRecruitersCandidateRequest("candidate-1", "John", "Smith", "john@example.com")
+        client.createCandidate("tenant-1", REQUEST);
+
+        server.verify();
+    }
+
+    @Test
+    void shouldRetrySamePostAfterTransientErrors() {
+        server.expect(times(2), requestTo(URL))
+                .andExpect(content().json("{\"externalId\": \"candidate-1\"}"))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        // target already has the candidate from a "lost" attempt -> idempotent 200
+        server.expect(once(), requestTo(URL))
+                .andExpect(content().json("{\"externalId\": \"candidate-1\"}"))
+                .andRespond(withStatus(HttpStatus.OK));
+
+        client.createCandidate("tenant-1", REQUEST);
+
+        server.verify();
+    }
+
+    @Test
+    void shouldNotRetryBadRequest() {
+        server.expect(once(), requestTo(URL))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+
+        ExternalSystemException exception = assertThrows(
+                ExternalSystemException.class,
+                () -> client.createCandidate("tenant-1", REQUEST)
         );
 
+        assertEquals(FailureType.PERMANENT, exception.failureType());
         server.verify();
     }
 }

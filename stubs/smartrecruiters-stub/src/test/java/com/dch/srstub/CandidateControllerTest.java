@@ -5,9 +5,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
+import java.time.Duration;
+
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -25,12 +29,17 @@ class CandidateControllerTest {
             }
             """;
 
+    private FailureSimulator failureSimulator;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
+        failureSimulator = new FailureSimulator();
         mockMvc = MockMvcBuilders
-                .standaloneSetup(new CandidateController(new CandidateStore()))
+                .standaloneSetup(
+                        new CandidateController(new CandidateStore(), failureSimulator),
+                        new FailureController(failureSimulator)
+                )
                 .build();
     }
 
@@ -102,6 +111,60 @@ class CandidateControllerTest {
                                 {"firstName": "John", "lastName": "Smith", "email": "john@example.com"}
                                 """))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void shouldReturnServiceUnavailableWithoutStoringCandidate() throws Exception {
+        failureSimulator.schedule(FailureMode.UNAVAILABLE, 1, Duration.ZERO);
+
+        postJohn().andExpect(status().isServiceUnavailable());
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates/candidate-1"))
+                .andExpect(status().isNotFound());
+
+        postJohn().andExpect(status().isCreated());
+    }
+
+    @Test
+    void shouldStoreCandidateEvenWhenResponseIsLostAndNotDuplicateOnRetry() throws Exception {
+        mockMvc.perform(post("/admin/failures")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"mode": "UNAVAILABLE_AFTER_SAVE", "count": 1}
+                                """))
+                .andExpect(status().isOk());
+
+        // attempt 1: target stores the candidate but the client sees 503
+        postJohn().andExpect(status().isServiceUnavailable());
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates/candidate-1"))
+                .andExpect(status().isOk());
+
+        // attempt 2 (client retry): same key -> existing candidate, no second record
+        postJohn()
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.externalId").value("candidate-1"));
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates"))
+                .andExpect(jsonPath("$", hasSize(1)));
+    }
+
+    @Test
+    void shouldStoreCandidateBeforeDelayedResponse() throws Exception {
+        failureSimulator.schedule(FailureMode.DELAY_AFTER_SAVE, 1, Duration.ofMillis(100));
+
+        long start = System.nanoTime();
+        postJohn().andExpect(status().isCreated());
+        long elapsedMillis = Duration.ofNanos(System.nanoTime() - start).toMillis();
+
+        assertTrue(elapsedMillis >= 100, "expected delay, was " + elapsedMillis + " ms");
+        postJohn().andExpect(status().isOk());
+    }
+
+    private ResultActions postJohn() throws Exception {
+        return mockMvc.perform(post("/api/tenants/tenant-1/candidates")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(JOHN));
     }
 
     private String createAndReturnId(String body) throws Exception {
