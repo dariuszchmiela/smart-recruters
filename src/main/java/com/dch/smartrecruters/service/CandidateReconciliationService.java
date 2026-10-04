@@ -20,9 +20,22 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Independent verification of one tenant: compares SAP and SmartRecruiters directly.
- * Never consults candidate_migration (what the migration engine believes happened) and never
- * writes to either system - both clients are only used for paged reads.
+ * Independent verification of one tenant: reads SAP and SmartRecruiters independently and compares them.
+ * <ul>
+ *   <li>Each SAP candidate is mapped into the target-owned field shape (externalId, firstName, lastName,
+ *       email) with {@link CandidateMapper}; target candidates are read as stored.</li>
+ *   <li>Both sides are compared by {@link CandidateFingerprint}: equal fingerprints are treated as equivalence
+ *       under its canonicalization rules (NFC, stripped whitespace, null == blank, case-sensitive), with
+ *       SHA-256 collisions considered negligible - not exact character-for-character equality of the
+ *       original strings.</li>
+ *   <li>{@code CandidateValidator} is intentionally not applied. Reconciliation verifies presence and content
+ *       independently of migration eligibility, so it is not a replay of the migration decision pipeline:
+ *       a source candidate that the migration would reject (e.g. missing email) is reported as
+ *       MISSING_IN_TARGET when the target does not have it, but as MATCHED when an equivalent candidate
+ *       already exists in the target anyway.</li>
+ *   <li>candidate_migration (what the migration engine believes happened) is never consulted.</li>
+ *   <li>Neither system is written to - both clients are only used for paged reads.</li>
+ * </ul>
  * <pre>
  * claim run (PENDING -> RUNNING)
  *   -> SAP pages:            expected target fingerprint per candidate -> working table (batch upsert)
@@ -183,9 +196,10 @@ public class CandidateReconciliationService {
     }
 
     /**
-     * The source side is fingerprinted as the migration would write it to the target (same mapper),
-     * so a MATCH means "the target holds exactly what the migration should have produced".
-     * Validation is deliberately not applied: a candidate the migration rejects is MISSING_IN_TARGET.
+     * Maps the SAP candidate into the target-owned field shape (same {@link CandidateMapper} as the migration),
+     * then fingerprints it using the same canonicalization used for the target side.
+     * Validation is deliberately not applied: the result says whether source and target fingerprints are
+     * equal (treated as equivalence), not whether the migration would have accepted the candidate.
      */
     private FingerprintedCandidate expectedInTarget(String tenantId, SapCandidate candidate) {
         if (!tenantId.equals(candidate.tenantId())) {

@@ -10,9 +10,15 @@ import java.text.Normalizer;
 import java.util.HexFormat;
 
 /**
- * Deterministic, persistable fingerprint of the candidate fields owned by this migration
- * (externalId, firstName, lastName, email). Source and target are fingerprinted with exactly the
- * same rules, so equal fingerprints mean "the target holds what the migration should have written".
+ * Deterministic, persistable fingerprint of the candidate fields owned by this migration:
+ * externalId, firstName, lastName, email. Nothing else is compared (no target-generated id,
+ * no timestamps, no migration state).
+ * <p>
+ * Source and target are fingerprinted with the same canonicalization rules. Reconciliation treats equal
+ * fingerprints as evidence that the two candidates are <b>equivalent under these rules</b> (SHA-256
+ * collisions are theoretically possible but considered negligible for this use case) - not that the
+ * original strings are equal character for character. For example, a source firstName {@code " John "}
+ * and a target firstName {@code "John"} produce the same fingerprint.
  * <p>
  * Canonical representation (version 1), fields in fixed order:
  * <pre>
@@ -20,8 +26,14 @@ import java.util.HexFormat;
  * field = "-"                      when absent
  *       | "+" length ":" value     otherwise (length in UTF-16 chars of the normalized value)
  * </pre>
- * Normalization of every field: Unicode NFC, then trim; null and blank are both "absent".
- * No case folding: names and emails are compared as migrated (the migration copies them verbatim).
+ * Canonicalization of every field, in this order:
+ * <ol>
+ *   <li>Unicode NFC normalization (composed and decomposed forms of the same text are equivalent)</li>
+ *   <li>surrounding whitespace removed with {@link String#strip()} (Unicode-aware)</li>
+ *   <li>null and blank (empty after stripping) are both treated as "absent"</li>
+ * </ol>
+ * There is no case folding and no other business normalization: {@code "John"} and {@code "john"},
+ * or {@code "John@example.com"} and {@code "john@example.com"}, are different.
  * The length prefix makes the encoding unambiguous - ("ab", "c") and ("a", "bc") differ.
  * Fingerprint = lowercase hex SHA-256 of the UTF-8 bytes of the canonical representation.
  */
@@ -33,14 +45,14 @@ public final class CandidateFingerprint {
     }
 
     /**
-     * What the migration is expected to write to the target for a source candidate.
+     * Source side: a source candidate already mapped into the target-owned field shape.
      */
     public static String of(SmartRecruitersCandidateRequest expected) {
         return of(expected.externalId(), expected.firstName(), expected.lastName(), expected.email());
     }
 
     /**
-     * What the target actually holds.
+     * Target side: the candidate as read from the target.
      */
     public static String of(SmartRecruitersCandidate actual) {
         return of(actual.externalId(), actual.firstName(), actual.lastName(), actual.email());
