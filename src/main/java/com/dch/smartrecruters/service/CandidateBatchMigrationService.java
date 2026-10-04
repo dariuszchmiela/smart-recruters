@@ -36,7 +36,8 @@ import java.util.concurrent.Semaphore;
  *   <li>processed - candidates read from SAP; always succeeded + skipped + failed</li>
  *   <li>succeeded - candidate is COMPLETED in the target: migrated now, or already COMPLETED
  *       (earlier job, or a run that crashed before its checkpoint) - a replayed page counts the same</li>
- *   <li>skipped - held by another live worker at that moment; its outcome is not known to this job</li>
+ *   <li>skipped - held by another live worker at that moment, or taken over from this job's stale claim
+ *       before it could be finished; its outcome is not known to this job</li>
  *   <li>failed - this attempt failed (validation, target, ...); the record is FAILED and retried by a later job</li>
  * </ul>
  */
@@ -185,7 +186,7 @@ public class CandidateBatchMigrationService {
         try {
             return switch (candidateMigrationService.migrateCandidate(tenantId, candidate)) {
                 case MIGRATED, ALREADY_MIGRATED -> CandidateResult.SUCCEEDED;
-                case CLAIMED_BY_OTHER_WORKER -> CandidateResult.SKIPPED;
+                case CLAIMED_BY_OTHER_WORKER, LEASE_LOST -> CandidateResult.SKIPPED;
             };
         } catch (RuntimeException e) {
             // the candidate record is already FAILED; a later job run retries it

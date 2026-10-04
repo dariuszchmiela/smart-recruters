@@ -9,6 +9,7 @@ public record StoredCandidate(
         String firstName,
         String lastName,
         String email,
-        Instant createdAt
+        Instant createdAt,
+        Instant updatedAt
 ) {
 }

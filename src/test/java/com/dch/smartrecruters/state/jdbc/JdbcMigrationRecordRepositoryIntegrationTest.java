@@ -21,8 +21,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,6 +33,7 @@ import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -114,7 +118,7 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
         insert(TENANT, CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1));
         Instant before = updatedAt(TENANT, CANDIDATE);
 
-        assertFalse(repository.tryStart(TENANT, CANDIDATE));
+        assertFalse(repository.tryStart(TENANT, CANDIDATE, UUID.randomUUID()));
         assertEquals(0, claimConcurrently(TENANT, CANDIDATE));
 
         assertEquals("IN_PROGRESS", status(TENANT, CANDIDATE));
@@ -133,7 +137,7 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
         assertTrue(updatedAt(TENANT, CANDIDATE).isAfter(before));
 
         // the new owner holds a fresh lease
-        assertFalse(repository.tryStart(TENANT, CANDIDATE));
+        assertFalse(repository.tryStart(TENANT, CANDIDATE, UUID.randomUUID()));
     }
 
     @Test
@@ -141,7 +145,7 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
         insert(TENANT, CANDIDATE, "COMPLETED", Duration.ofDays(1));
         Instant before = updatedAt(TENANT, CANDIDATE);
 
-        assertFalse(repository.tryStart(TENANT, CANDIDATE));
+        assertFalse(repository.tryStart(TENANT, CANDIDATE, UUID.randomUUID()));
         assertEquals(0, claimConcurrently(TENANT, CANDIDATE));
 
         assertEquals("COMPLETED", status(TENANT, CANDIDATE));
@@ -150,20 +154,21 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
 
     @Test
     void shouldTreatSameCandidateInOtherTenantAsSeparateRecord() {
-        assertTrue(repository.tryStart("tenant-1", CANDIDATE));
-        assertTrue(repository.tryStart("tenant-2", CANDIDATE));
-        assertFalse(repository.tryStart("tenant-1", CANDIDATE));
+        assertTrue(repository.tryStart("tenant-1", CANDIDATE, UUID.randomUUID()));
+        assertTrue(repository.tryStart("tenant-2", CANDIDATE, UUID.randomUUID()));
+        assertFalse(repository.tryStart("tenant-1", CANDIDATE, UUID.randomUUID()));
     }
 
     @Test
     void shouldRefreshUpdatedAtWhenMarkingCompletedAndFailed() throws Exception {
-        insert(TENANT, CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1));
-        insert("tenant-2", CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1));
+        UUID owner = UUID.randomUUID();
+        insert(TENANT, CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1), owner);
+        insert("tenant-2", CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1), owner);
         Instant completedBefore = updatedAt(TENANT, CANDIDATE);
         Instant failedBefore = updatedAt("tenant-2", CANDIDATE);
 
-        repository.markCompleted(TENANT, CANDIDATE);
-        repository.markFailed("tenant-2", CANDIDATE);
+        assertTrue(repository.markCompleted(TENANT, CANDIDATE, owner));
+        assertTrue(repository.markFailed("tenant-2", CANDIDATE, owner));
 
         assertEquals("COMPLETED", status(TENANT, CANDIDATE));
         assertTrue(updatedAt(TENANT, CANDIDATE).isAfter(completedBefore));
@@ -173,11 +178,119 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
 
     @Test
     void shouldNotOverwriteCompletedWithLateFailureFromExpiredWorker() throws Exception {
-        insert(TENANT, CANDIDATE, "COMPLETED", Duration.ofMinutes(1));
+        UUID owner = UUID.randomUUID();
+        insert(TENANT, CANDIDATE, "COMPLETED", Duration.ofMinutes(1), owner);
 
-        repository.markFailed(TENANT, CANDIDATE);
+        assertFalse(repository.markFailed(TENANT, CANDIDATE, owner));
 
         assertEquals("COMPLETED", status(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldSetOwnerOnEveryKindOfClaim() throws Exception {
+        UUID newRecordOwner = UUID.randomUUID();
+        assertTrue(repository.tryStart(TENANT, CANDIDATE, newRecordOwner));
+        assertEquals(newRecordOwner, leaseOwner(TENANT, CANDIDATE));
+
+        insert(TENANT, "failed", "FAILED", Duration.ofSeconds(10));
+        UUID failedOwner = UUID.randomUUID();
+        assertTrue(repository.tryStart(TENANT, "failed", failedOwner));
+        assertEquals(failedOwner, leaseOwner(TENANT, "failed"));
+    }
+
+    @Test
+    void shouldLetWorkerBReclaimStaleCandidate() throws Exception {
+        UUID workerA = UUID.randomUUID();
+
+        UUID workerB = takenOverFrom(workerA);
+
+        assertEquals("IN_PROGRESS", status(TENANT, CANDIDATE));
+        assertEquals(workerB, leaseOwner(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldNotLetStaleWorkerMarkCompleted() throws Exception {
+        UUID workerA = UUID.randomUUID();
+        UUID workerB = takenOverFrom(workerA);
+        Instant before = updatedAt(TENANT, CANDIDATE);
+
+        assertFalse(repository.markCompleted(TENANT, CANDIDATE, workerA));
+
+        assertEquals("IN_PROGRESS", status(TENANT, CANDIDATE));
+        assertEquals(workerB, leaseOwner(TENANT, CANDIDATE));
+        assertEquals(before, updatedAt(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldNotLetStaleWorkerMarkFailed() throws Exception {
+        UUID workerA = UUID.randomUUID();
+        UUID workerB = takenOverFrom(workerA);
+
+        assertFalse(repository.markFailed(TENANT, CANDIDATE, workerA));
+
+        assertEquals("IN_PROGRESS", status(TENANT, CANDIDATE));
+        assertEquals(workerB, leaseOwner(TENANT, CANDIDATE));
+        // B's claim is still fresh: nobody else can take the record now
+        assertFalse(repository.tryStart(TENANT, CANDIDATE, UUID.randomUUID()));
+    }
+
+    @Test
+    void shouldLetCurrentOwnerCompleteTakenOverCandidate() throws Exception {
+        UUID workerA = UUID.randomUUID();
+        UUID workerB = takenOverFrom(workerA);
+        assertFalse(repository.markFailed(TENANT, CANDIDATE, workerA));
+
+        assertTrue(repository.markCompleted(TENANT, CANDIDATE, workerB));
+
+        assertEquals("COMPLETED", status(TENANT, CANDIDATE));
+        assertNull(leaseOwner(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldKeepCompletedTerminalForEveryWorker() throws Exception {
+        UUID workerA = UUID.randomUUID();
+        UUID workerB = takenOverFrom(workerA);
+        assertTrue(repository.markCompleted(TENANT, CANDIDATE, workerB));
+        age(TENANT, CANDIDATE, Duration.ofDays(1));
+        Instant before = updatedAt(TENANT, CANDIDATE);
+
+        assertFalse(repository.markFailed(TENANT, CANDIDATE, workerA));
+        assertFalse(repository.markCompleted(TENANT, CANDIDATE, workerA));
+        assertFalse(repository.markFailed(TENANT, CANDIDATE, workerB));
+        assertFalse(repository.tryStart(TENANT, CANDIDATE, UUID.randomUUID()));
+        assertEquals(0, claimConcurrently(TENANT, CANDIDATE));
+
+        assertEquals("COMPLETED", status(TENANT, CANDIDATE));
+        assertEquals(before, updatedAt(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldLeaveExactlyOneCurrentOwnerAfterConcurrentReclaim() throws Exception {
+        UUID workerA = UUID.randomUUID();
+        assertTrue(repository.tryStart(TENANT, CANDIDATE, workerA));
+        age(TENANT, CANDIDATE, CLAIM_TIMEOUT.plusMinutes(1));
+
+        List<UUID> winners = claimantsWinning(TENANT, CANDIDATE);
+
+        assertEquals(1, winners.size());
+        UUID currentOwner = winners.getFirst();
+        assertEquals(currentOwner, leaseOwner(TENANT, CANDIDATE));
+        assertFalse(repository.markCompleted(TENANT, CANDIDATE, workerA));
+        assertTrue(repository.markCompleted(TENANT, CANDIDATE, currentOwner));
+        assertEquals("COMPLETED", status(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldNotLetAnyoneFinishLegacyInProgressRowWithoutOwnerUntilReclaimed() throws Exception {
+        // IN_PROGRESS rows that existed before V5 have no owner
+        insert(TENANT, CANDIDATE, "IN_PROGRESS", Duration.ofMinutes(1));
+
+        assertFalse(repository.markCompleted(TENANT, CANDIDATE, UUID.randomUUID()));
+
+        age(TENANT, CANDIDATE, CLAIM_TIMEOUT.plusMinutes(1));
+        UUID owner = UUID.randomUUID();
+        assertTrue(repository.tryStart(TENANT, CANDIDATE, owner));
+        assertTrue(repository.markCompleted(TENANT, CANDIDATE, owner));
     }
 
     @Test
@@ -191,45 +304,88 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
     }
 
     private int claimConcurrently(String tenantId, String sourceRecordId) throws Exception {
+        return claimantsWinning(tenantId, sourceRecordId).size();
+    }
+
+    /**
+     * Every worker races with its own owner token; returns the tokens whose claim succeeded.
+     */
+    private List<UUID> claimantsWinning(String tenantId, String sourceRecordId) throws Exception {
         CountDownLatch ready = new CountDownLatch(WORKERS);
         CountDownLatch start = new CountDownLatch(1);
-        List<Future<Boolean>> results = new ArrayList<>();
+        Map<UUID, Future<Boolean>> results = new LinkedHashMap<>();
 
         try (ExecutorService executor = Executors.newFixedThreadPool(WORKERS)) {
             for (int i = 0; i < WORKERS; i++) {
-                results.add(executor.submit(() -> {
+                UUID owner = UUID.randomUUID();
+                results.put(owner, executor.submit(() -> {
                     ready.countDown();
                     start.await();
-                    return repository.tryStart(tenantId, sourceRecordId);
+                    return repository.tryStart(tenantId, sourceRecordId, owner);
                 }));
             }
 
             ready.await();
             start.countDown();
 
-            int claimed = 0;
-            for (Future<Boolean> result : results) {
-                if (result.get()) {
-                    claimed++;
+            List<UUID> winners = new ArrayList<>();
+            for (Map.Entry<UUID, Future<Boolean>> result : results.entrySet()) {
+                if (result.getValue().get()) {
+                    winners.add(result.getKey());
                 }
             }
-            return claimed;
+            return winners;
         }
     }
 
     private void insert(String tenantId, String sourceRecordId, String status, Duration age) throws SQLException {
+        insert(tenantId, sourceRecordId, status, age, null);
+    }
+
+    private void insert(String tenantId, String sourceRecordId, String status, Duration age, UUID leaseOwner)
+            throws SQLException {
         String sql = """
-                INSERT INTO candidate_migration (tenant_id, source_record_id, status, updated_at)
-                VALUES (?, ?, ?, now() - (? * INTERVAL '1 millisecond'))
+                INSERT INTO candidate_migration (tenant_id, source_record_id, status, lease_owner, updated_at)
+                VALUES (?, ?, ?, ?, now() - (? * INTERVAL '1 millisecond'))
                 """;
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, tenantId);
             statement.setString(2, sourceRecordId);
             statement.setString(3, status);
-            statement.setLong(4, age.toMillis());
+            statement.setObject(4, leaseOwner);
+            statement.setLong(5, age.toMillis());
             statement.executeUpdate();
         }
+    }
+
+    private UUID leaseOwner(String tenantId, String sourceRecordId) throws SQLException {
+        return queryColumn(tenantId, sourceRecordId, "lease_owner", UUID.class);
+    }
+
+    private void age(String tenantId, String sourceRecordId, Duration age) throws SQLException {
+        String sql = """
+                UPDATE candidate_migration SET updated_at = now() - (? * INTERVAL '1 millisecond')
+                WHERE tenant_id = ? AND source_record_id = ?
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, age.toMillis());
+            statement.setString(2, tenantId);
+            statement.setString(3, sourceRecordId);
+            statement.executeUpdate();
+        }
+    }
+
+    /**
+     * Worker A claims, its claim goes stale, worker B takes it over. Returns B's token.
+     */
+    private UUID takenOverFrom(UUID workerA) throws SQLException {
+        assertTrue(repository.tryStart(TENANT, CANDIDATE, workerA));
+        age(TENANT, CANDIDATE, CLAIM_TIMEOUT.plusMinutes(1));
+        UUID workerB = UUID.randomUUID();
+        assertTrue(repository.tryStart(TENANT, CANDIDATE, workerB));
+        return workerB;
     }
 
     private String status(String tenantId, String sourceRecordId) throws SQLException {

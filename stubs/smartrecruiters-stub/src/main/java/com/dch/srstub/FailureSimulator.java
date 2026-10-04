@@ -8,7 +8,7 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * Deterministic failure injection: the next {@code count} create requests fail with the given mode.
+ * Deterministic failure injection: the next {@code count} create/upsert requests fail with the given mode.
  */
 @Component
 public class FailureSimulator {

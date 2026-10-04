@@ -9,6 +9,7 @@ import java.util.concurrent.Future;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class CandidateStoreTest {
 
@@ -36,5 +37,26 @@ class CandidateStoreTest {
 
         assertEquals(1, created);
         assertEquals(1, store.findAll("tenant-1").size());
+    }
+
+    @Test
+    void shouldKeepOneCandidateForConcurrentUpsertsAndKeepItsIdentity() throws Exception {
+        CandidateStore store = new CandidateStore();
+        String id = store.create("tenant-1",
+                new SmartRecruitersCandidateRequest("candidate-1", "John", "Smith", "john@example.com"))
+                .candidate().id();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(8)) {
+            var futures = IntStream.range(0, 50)
+                    .mapToObj(i -> executor.submit(() -> store.upsert("tenant-1",
+                            new SmartRecruitersCandidateRequest("candidate-1", "John", "Smith", "v" + i + "@example.com"))))
+                    .toList();
+            for (Future<CandidateStore.CreateResult> future : futures) {
+                assertFalse(future.get().created());
+            }
+        }
+
+        assertEquals(1, store.findAll("tenant-1").size());
+        assertEquals(id, store.find("tenant-1", "candidate-1").orElseThrow().id());
     }
 }

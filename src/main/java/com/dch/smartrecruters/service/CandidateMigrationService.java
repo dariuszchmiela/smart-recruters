@@ -9,10 +9,15 @@ import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
 import com.dch.smartrecruters.state.MigrationStatus;
 import com.dch.smartrecruters.validation.CandidateValidator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.util.UUID;
 import java.util.function.Supplier;
 
 public class CandidateMigrationService {
+
+    private static final Logger log = LoggerFactory.getLogger(CandidateMigrationService.class);
 
     private final SapClient sapClient;
     private final CandidateMapper mapper;
@@ -53,7 +58,10 @@ public class CandidateMigrationService {
             String candidateId,
             Supplier<SapCandidate> sourceLoader
     ) {
-        if (!migrationRecordRepository.tryStart(tenantId, candidateId)) {
+        // fencing token of this processing attempt; finishing the record is conditional on it
+        UUID leaseOwner = UUID.randomUUID();
+
+        if (!migrationRecordRepository.tryStart(tenantId, candidateId, leaseOwner)) {
             return notClaimed(tenantId, candidateId);
         }
 
@@ -66,13 +74,24 @@ public class CandidateMigrationService {
             SmartRecruitersCandidateRequest request = mapper.mapToRequest(candidate);
 
             smartRecruitersClient.createCandidate(tenantId, request);
-
-            migrationRecordRepository.markCompleted(tenantId, candidateId);
-            return CandidateMigrationOutcome.MIGRATED;
         } catch (RuntimeException e) {
-            migrationRecordRepository.markFailed(tenantId, candidateId);
+            if (!migrationRecordRepository.markFailed(tenantId, candidateId, leaseOwner)) {
+                // the record belongs to another worker now; this attempt's failure does not decide it
+                log.warn("Candidate {}:{} was taken over by another worker; failure of the stale attempt "
+                        + "is not recorded: {}", tenantId, candidateId, e.toString());
+                return CandidateMigrationOutcome.LEASE_LOST;
+            }
             throw e;
         }
+
+        if (!migrationRecordRepository.markCompleted(tenantId, candidateId, leaseOwner)) {
+            // the create itself is harmless (create-if-absent on tenantId + externalId), but this
+            // attempt must not report the record as migrated: the new owner decides its state
+            log.warn("Candidate {}:{} was taken over by another worker before it could be marked COMPLETED",
+                    tenantId, candidateId);
+            return CandidateMigrationOutcome.LEASE_LOST;
+        }
+        return CandidateMigrationOutcome.MIGRATED;
     }
 
     /**

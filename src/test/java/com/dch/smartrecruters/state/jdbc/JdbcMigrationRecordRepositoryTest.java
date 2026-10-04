@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,18 +43,20 @@ class JdbcMigrationRecordRepositoryTest {
     void shouldClaimWhenStatementChangedRowAndBindClaimTimeout() throws SQLException {
         when(statement.executeUpdate()).thenReturn(1);
 
-        assertTrue(repository.tryStart("tenant-1", "candidate-1"));
+        UUID owner = UUID.randomUUID();
+        assertTrue(repository.tryStart("tenant-1", "candidate-1", owner));
 
         verify(statement).setString(1, "tenant-1");
         verify(statement).setString(2, "candidate-1");
-        verify(statement).setLong(3, Duration.ofMinutes(5).toMillis());
+        verify(statement).setObject(3, owner);
+        verify(statement).setLong(4, Duration.ofMinutes(5).toMillis());
     }
 
     @Test
     void shouldNotClaimWhenNoRowChanged() throws SQLException {
         when(statement.executeUpdate()).thenReturn(0);
 
-        assertFalse(repository.tryStart("tenant-1", "candidate-1"));
+        assertFalse(repository.tryStart("tenant-1", "candidate-1", UUID.randomUUID()));
     }
 
     @Test

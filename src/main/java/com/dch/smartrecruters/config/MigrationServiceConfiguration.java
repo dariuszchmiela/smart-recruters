@@ -4,8 +4,10 @@ import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.service.CandidateBatchMigrationService;
+import com.dch.smartrecruters.service.CandidateDeltaService;
 import com.dch.smartrecruters.service.CandidateMigrationService;
 import com.dch.smartrecruters.service.TenantMigrationJobLauncher;
+import com.dch.smartrecruters.state.CandidateDeltaEventRepository;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
 import com.dch.smartrecruters.state.TenantMigrationJobRepository;
 import com.dch.smartrecruters.validation.CandidateValidator;
@@ -41,6 +43,23 @@ public class MigrationServiceConfiguration {
                 candidateValidator,
                 smartRecruitersClient,
                 migrationRecordRepository
+        );
+    }
+
+    @Bean
+    public CandidateDeltaService candidateDeltaService(
+            SapClient sapClient,
+            CandidateMapper candidateMapper,
+            CandidateValidator candidateValidator,
+            SmartRecruitersClient smartRecruitersClient,
+            CandidateDeltaEventRepository candidateDeltaEventRepository
+    ) {
+        return new CandidateDeltaService(
+                sapClient,
+                candidateMapper,
+                candidateValidator,
+                smartRecruitersClient,
+                candidateDeltaEventRepository
         );
     }
 

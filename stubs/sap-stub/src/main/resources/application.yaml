@@ -1,6 +1,19 @@
 spring:
   application:
     name: sap-stub
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      properties:
+        # plain JSON, consumers do not need this stub's Java classes
+        spring.json.add.type.headers: false
+        # do not block a PUT for a minute when no broker is running
+        max.block.ms: 5000
 
 server:
   port: ${SERVER_PORT:8081}
+
+sap-stub:
+  candidate-changes-topic: ${CANDIDATE_CHANGES_TOPIC:candidate-changes}

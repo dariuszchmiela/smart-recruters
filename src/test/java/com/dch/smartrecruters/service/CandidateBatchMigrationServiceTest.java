@@ -25,9 +25,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -192,6 +194,29 @@ class CandidateBatchMigrationServiceTest {
     }
 
     @Test
+    void shouldCountCandidateTakenOverFromStaleClaimAsSkippedNotSucceeded() {
+        sap.addCandidates(3);
+        // the target call for candidate-02 outlives its claim; another worker takes the record over
+        target.onCreateOf = externalId -> {
+            if (externalId.equals("candidate-02")) {
+                records.takeOver("candidate-02");
+            }
+        };
+
+        TenantMigrationJob job = service.startOrResume(TENANT);
+        service.runJob(job.jobId());
+
+        TenantMigrationJob finished = jobs.get(job.jobId());
+        assertEquals(TenantMigrationJobStatus.COMPLETED, finished.status());
+        assertEquals(3, finished.processedCount());
+        assertEquals(2, finished.succeededCount());
+        assertEquals(1, finished.skippedCount());
+        assertEquals(0, finished.failedCount());
+        // this job neither completed nor failed the record it no longer owned
+        assertEquals(MigrationStatus.IN_PROGRESS, records.status("candidate-02"));
+    }
+
+    @Test
     void shouldRetryPreviouslyFailedCandidatesInNextJob() {
         sap.addCandidates(4);
         target.rejected.add("candidate-02");
@@ -351,6 +376,8 @@ class CandidateBatchMigrationServiceTest {
         volatile long delayMillis;
         volatile Runnable onCreate = () -> {
         };
+        volatile Consumer<String> onCreateOf = externalId -> {
+        };
 
         @Override
         public void createCandidate(String tenantId, SmartRecruitersCandidateRequest request) {
@@ -361,6 +388,7 @@ class CandidateBatchMigrationServiceTest {
                     Thread.sleep(delayMillis);
                 }
                 onCreate.run();
+                onCreateOf.accept(request.externalId());
                 if (rejected.contains(request.externalId())) {
                     throw new IllegalStateException("Target rejected " + request.externalId());
                 }
@@ -372,6 +400,11 @@ class CandidateBatchMigrationServiceTest {
                 inFlight.decrementAndGet();
             }
         }
+
+        @Override
+        public void upsertCandidate(String tenantId, SmartRecruitersCandidateRequest request) {
+            throw new AssertionError("initial load must use create-if-absent, not upsert");
+        }
     }
 
     /**
@@ -380,13 +413,15 @@ class CandidateBatchMigrationServiceTest {
     private static final class InMemoryMigrationRecordRepository implements MigrationRecordRepository {
 
         private final Map<String, MigrationStatus> statuses = Collections.synchronizedMap(new HashMap<>());
+        private final Map<String, UUID> owners = Collections.synchronizedMap(new HashMap<>());
 
         @Override
-        public boolean tryStart(String tenantId, String sourceRecordId) {
+        public boolean tryStart(String tenantId, String sourceRecordId, UUID leaseOwner) {
             synchronized (statuses) {
                 MigrationStatus current = statuses.get(sourceRecordId);
                 if (current == null || current == MigrationStatus.FAILED) {
                     statuses.put(sourceRecordId, MigrationStatus.IN_PROGRESS);
+                    owners.put(sourceRecordId, leaseOwner);
                     return true;
                 }
                 return false;
@@ -394,13 +429,25 @@ class CandidateBatchMigrationServiceTest {
         }
 
         @Override
-        public void markCompleted(String tenantId, String sourceRecordId) {
-            statuses.put(sourceRecordId, MigrationStatus.COMPLETED);
+        public boolean markCompleted(String tenantId, String sourceRecordId, UUID leaseOwner) {
+            return finish(sourceRecordId, leaseOwner, MigrationStatus.COMPLETED);
         }
 
         @Override
-        public void markFailed(String tenantId, String sourceRecordId) {
-            statuses.put(sourceRecordId, MigrationStatus.FAILED);
+        public boolean markFailed(String tenantId, String sourceRecordId, UUID leaseOwner) {
+            return finish(sourceRecordId, leaseOwner, MigrationStatus.FAILED);
+        }
+
+        private boolean finish(String sourceRecordId, UUID leaseOwner, MigrationStatus status) {
+            synchronized (statuses) {
+                if (statuses.get(sourceRecordId) != MigrationStatus.IN_PROGRESS
+                        || !leaseOwner.equals(owners.get(sourceRecordId))) {
+                    return false;
+                }
+                statuses.put(sourceRecordId, status);
+                owners.remove(sourceRecordId);
+                return true;
+            }
         }
 
         @Override
@@ -410,6 +457,14 @@ class CandidateBatchMigrationServiceTest {
 
         void inProgressElsewhere(String id) {
             statuses.put(id, MigrationStatus.IN_PROGRESS);
+            owners.put(id, UUID.randomUUID());
+        }
+
+        /**
+         * The claim of the worker currently processing {@code id} expired and another worker took it over.
+         */
+        void takeOver(String id) {
+            owners.put(id, UUID.randomUUID());
         }
 
         void complete(String... ids) {

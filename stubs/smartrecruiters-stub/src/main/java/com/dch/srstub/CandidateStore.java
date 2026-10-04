@@ -16,11 +16,12 @@ public class CandidateStore {
     private final ConcurrentMap<Key, StoredCandidate> candidates = new ConcurrentHashMap<>();
 
     /**
-     * Creates the candidate only if no candidate exists for tenantId + externalId.
+     * Creates the candidate only if no candidate exists for tenantId + externalId; an existing one is left unchanged.
      * The check and the insert are a single atomic operation.
      */
     public CreateResult create(String tenantId, SmartRecruitersCandidateRequest request) {
         Key key = new Key(tenantId, request.externalId());
+        Instant now = Instant.now();
         StoredCandidate candidate = new StoredCandidate(
                 UUID.randomUUID().toString(),
                 tenantId,
@@ -28,7 +29,8 @@ public class CandidateStore {
                 request.firstName(),
                 request.lastName(),
                 request.email(),
-                Instant.now()
+                now,
+                now
         );
 
         StoredCandidate existing = candidates.putIfAbsent(key, candidate);
@@ -36,6 +38,32 @@ public class CandidateStore {
         return existing == null
                 ? new CreateResult(candidate, true)
                 : new CreateResult(existing, false);
+    }
+
+    /**
+     * Creates the candidate, or replaces the data of the existing one for tenantId + externalId,
+     * keeping its id and createdAt. Atomic per key, so concurrent upserts never create duplicates.
+     */
+    public CreateResult upsert(String tenantId, SmartRecruitersCandidateRequest request) {
+        Key key = new Key(tenantId, request.externalId());
+        boolean[] created = {false};
+
+        StoredCandidate stored = candidates.compute(key, (ignored, existing) -> {
+            Instant now = Instant.now();
+            if (existing == null) {
+                created[0] = true;
+                return new StoredCandidate(
+                        UUID.randomUUID().toString(), tenantId, request.externalId(),
+                        request.firstName(), request.lastName(), request.email(), now, now
+                );
+            }
+            return new StoredCandidate(
+                    existing.id(), tenantId, request.externalId(),
+                    request.firstName(), request.lastName(), request.email(), existing.createdAt(), now
+            );
+        });
+
+        return new CreateResult(stored, created[0]);
     }
 
     public Optional<StoredCandidate> find(String tenantId, String externalId) {

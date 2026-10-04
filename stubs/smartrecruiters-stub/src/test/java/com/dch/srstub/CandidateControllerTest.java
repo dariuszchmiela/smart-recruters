@@ -14,6 +14,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -41,6 +42,89 @@ class CandidateControllerTest {
                         new FailureController(failureSimulator)
                 )
                 .build();
+    }
+
+    @Test
+    void shouldCreateCandidateOnFirstUpsert() throws Exception {
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(JOHN))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", "/api/tenants/tenant-1/candidates/candidate-1"))
+                .andExpect(jsonPath("$.email").value("john@example.com"));
+    }
+
+    @Test
+    void shouldUpdateExistingCandidateOnUpsertWithoutDuplicate() throws Exception {
+        String created = mockMvc.perform(post("/api/tenants/tenant-1/candidates")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(JOHN))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String id = JsonPath.read(created, "$.id");
+
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"externalId": "candidate-1", "firstName": "John", "lastName": "Doe",
+                                 "email": "john.doe@example.com"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(id))
+                .andExpect(jsonPath("$.lastName").value("Doe"))
+                .andExpect(jsonPath("$.email").value("john.doe@example.com"));
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates"))
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].email").value("john.doe@example.com"));
+    }
+
+    @Test
+    void shouldNotOverwriteExistingCandidateOnCreate() throws Exception {
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "John", "lastName": "Doe", "email": "new@example.com"}
+                                """))
+                .andExpect(status().isCreated());
+
+        // a late initial-load create must not roll back the newer upserted data
+        mockMvc.perform(post("/api/tenants/tenant-1/candidates")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(JOHN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.email").value("new@example.com"));
+    }
+
+    @Test
+    void shouldKeepUpsertsOfTenantsSeparate() throws Exception {
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-1")
+                .contentType(MediaType.APPLICATION_JSON).content(JOHN)).andExpect(status().isCreated());
+        mockMvc.perform(put("/api/tenants/tenant-2/candidates/candidate-1")
+                .contentType(MediaType.APPLICATION_JSON).content(JOHN)).andExpect(status().isCreated());
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates")).andExpect(jsonPath("$", hasSize(1)));
+        mockMvc.perform(get("/api/tenants/tenant-2/candidates")).andExpect(jsonPath("$", hasSize(1)));
+    }
+
+    @Test
+    void shouldRejectUpsertWithDifferentExternalIdInBody() throws Exception {
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-2")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(JOHN))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void shouldApplyScheduledFailureToUpsert() throws Exception {
+        failureSimulator.schedule(FailureMode.UNAVAILABLE, 1, Duration.ZERO);
+
+        mockMvc.perform(put("/api/tenants/tenant-1/candidates/candidate-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(JOHN))
+                .andExpect(status().isServiceUnavailable());
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates/candidate-1"))
+                .andExpect(status().isNotFound());
     }
 
     @Test

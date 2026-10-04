@@ -8,6 +8,22 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:migration-service}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # a payload that cannot be read is handed to the error handler (-> DLT) instead of blocking the partition
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+        # plain JSON contract: producers do not need to share Java classes with this service
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: com.dch.smartrecruters.messaging.CandidateChangedEvent
+    listener:
+      ack-mode: record
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:3}
 
 migration:
   # IN_PROGRESS older than this is treated as abandoned (dead worker) and can be claimed again
@@ -23,6 +39,15 @@ migration:
   # and longer than the slowest page
   job-lease-timeout: ${MIGRATION_JOB_LEASE_TIMEOUT:10m}
   job-recovery-interval: ${MIGRATION_JOB_RECOVERY_INTERVAL:1m}
+  kafka:
+    candidate-changes-topic: ${MIGRATION_KAFKA_CANDIDATE_CHANGES_TOPIC:candidate-changes}
+    candidate-changes-dlt-topic: ${MIGRATION_KAFKA_CANDIDATE_CHANGES_DLT_TOPIC:candidate-changes.DLT}
+    partitions: ${MIGRATION_KAFKA_PARTITIONS:3}
+    # deliveries of one event in total; every delivery already includes the HTTP retries
+    max-attempts: ${MIGRATION_KAFKA_MAX_ATTEMPTS:3}
+    retry-initial-backoff: ${MIGRATION_KAFKA_RETRY_INITIAL_BACKOFF:1s}
+    retry-multiplier: ${MIGRATION_KAFKA_RETRY_MULTIPLIER:2.0}
+    retry-max-backoff: ${MIGRATION_KAFKA_RETRY_MAX_BACKOFF:10s}
 
 clients:
   sap:

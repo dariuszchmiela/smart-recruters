@@ -1,7 +1,9 @@
 package com.dch.smartrecruters.config;
 
+import com.dch.smartrecruters.state.CandidateDeltaEventRepository;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
 import com.dch.smartrecruters.state.TenantMigrationJobRepository;
+import com.dch.smartrecruters.state.jdbc.JdbcCandidateDeltaEventRepository;
 import com.dch.smartrecruters.state.jdbc.JdbcMigrationRecordRepository;
 import com.dch.smartrecruters.state.jdbc.JdbcTenantMigrationJobRepository;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -28,5 +30,13 @@ public class MigrationStateConfiguration {
             MigrationProperties properties
     ) {
         return new JdbcTenantMigrationJobRepository(dataSource, properties.jobLeaseTimeout());
+    }
+
+    @Bean
+    public CandidateDeltaEventRepository candidateDeltaEventRepository(
+            DataSource dataSource,
+            MigrationProperties properties
+    ) {
+        return new JdbcCandidateDeltaEventRepository(dataSource, properties.claimTimeout());
     }
 }

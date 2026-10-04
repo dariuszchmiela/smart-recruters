@@ -33,4 +33,23 @@ public class RestSmartRecruitersClient implements SmartRecruitersClient {
                         .toBodilessEntity()
         );
     }
+
+    /**
+     * PUT on the business identity is idempotent, so retrying it is safe as well.
+     */
+    @Override
+    public void upsertCandidate(
+            String tenantId,
+            SmartRecruitersCandidateRequest request
+    ) {
+        executor.execute(
+                "SmartRecruiters PUT candidate " + tenantId + ":" + request.externalId(),
+                () -> restClient.put()
+                        .uri("/api/tenants/{tenantId}/candidates/{externalId}", tenantId, request.externalId())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(request)
+                        .retrieve()
+                        .toBodilessEntity()
+        );
+    }
 }

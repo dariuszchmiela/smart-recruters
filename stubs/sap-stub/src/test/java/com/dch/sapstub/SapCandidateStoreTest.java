@@ -46,4 +46,16 @@ class SapCandidateStoreTest {
         assertEquals(ids.stream().sorted().toList(), ids);
         assertEquals(11, page);
     }
+
+    @Test
+    void shouldReturnChangedCandidateFromSingleLookupAndPage() {
+        SapCandidateStore store = new SapCandidateStore(List.of(
+                new SapCandidate("a", "tenant-1", "A", "A", "a@example.com")
+        ));
+
+        store.save(new SapCandidate("a", "tenant-1", "A", "Changed", "changed@example.com"));
+
+        assertEquals("changed@example.com", store.find("tenant-1", "a").orElseThrow().email());
+        assertEquals(List.of("Changed"), store.findPage("tenant-1", 0, 10).items().stream().map(SapCandidate::lastName).toList());
+    }
 }

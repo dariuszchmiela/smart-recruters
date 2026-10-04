@@ -79,6 +79,54 @@ class RestSmartRecruitersClientTest {
     }
 
     @Test
+    void shouldPutCandidateToItsBusinessIdentityForUpsert() {
+        server.expect(requestTo(URL + "/candidate-1"))
+                .andExpect(method(HttpMethod.PUT))
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {
+                          "externalId": "candidate-1",
+                          "firstName": "John",
+                          "lastName": "Smith",
+                          "email": "john@example.com"
+                        }
+                        """))
+                .andRespond(withStatus(HttpStatus.OK));
+
+        client.upsertCandidate("tenant-1", REQUEST);
+
+        server.verify();
+    }
+
+    @Test
+    void shouldRetryUpsertAfterTransientErrors() {
+        server.expect(times(2), requestTo(URL + "/candidate-1"))
+                .andExpect(method(HttpMethod.PUT))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(once(), requestTo(URL + "/candidate-1"))
+                .andExpect(method(HttpMethod.PUT))
+                .andRespond(withStatus(HttpStatus.OK));
+
+        client.upsertCandidate("tenant-1", REQUEST);
+
+        server.verify();
+    }
+
+    @Test
+    void shouldNotRetryRejectedUpsert() {
+        server.expect(once(), requestTo(URL + "/candidate-1"))
+                .andRespond(withStatus(HttpStatus.CONFLICT));
+
+        ExternalSystemException exception = assertThrows(
+                ExternalSystemException.class,
+                () -> client.upsertCandidate("tenant-1", REQUEST)
+        );
+
+        assertEquals(FailureType.PERMANENT, exception.failureType());
+        server.verify();
+    }
+
+    @Test
     void shouldNotRetryBadRequest() {
         server.expect(once(), requestTo(URL))
                 .andRespond(withStatus(HttpStatus.BAD_REQUEST));

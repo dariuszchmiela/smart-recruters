@@ -21,6 +21,9 @@ import java.time.Duration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -56,7 +59,9 @@ class CandidateMigrationResilienceTest {
         smartRecruiters = MockRestServiceServer.bindTo(srBuilder).build();
 
         migrationRecordRepository = mock(MigrationRecordRepository.class);
-        when(migrationRecordRepository.tryStart("tenant-1", "candidate-1")).thenReturn(true);
+        when(migrationRecordRepository.tryStart(eq("tenant-1"), eq("candidate-1"), any())).thenReturn(true);
+        when(migrationRecordRepository.markCompleted(anyString(), anyString(), any())).thenReturn(true);
+        when(migrationRecordRepository.markFailed(anyString(), anyString(), any())).thenReturn(true);
 
         service = new CandidateMigrationService(
                 new RestSapClient(sapBuilder.build(), executor),
@@ -81,8 +86,8 @@ class CandidateMigrationResilienceTest {
         // target retry does not fetch SAP again
         sap.verify();
         smartRecruiters.verify();
-        verify(migrationRecordRepository).markCompleted("tenant-1", "candidate-1");
-        verify(migrationRecordRepository, never()).markFailed("tenant-1", "candidate-1");
+        verify(migrationRecordRepository).markCompleted(eq("tenant-1"), eq("candidate-1"), any());
+        verify(migrationRecordRepository, never()).markFailed(eq("tenant-1"), eq("candidate-1"), any());
     }
 
     @Test
@@ -100,8 +105,8 @@ class CandidateMigrationResilienceTest {
         assertEquals(FailureType.TRANSIENT, exception.failureType());
         sap.verify();
         smartRecruiters.verify();
-        verify(migrationRecordRepository).markFailed("tenant-1", "candidate-1");
-        verify(migrationRecordRepository, never()).markCompleted("tenant-1", "candidate-1");
+        verify(migrationRecordRepository).markFailed(eq("tenant-1"), eq("candidate-1"), any());
+        verify(migrationRecordRepository, never()).markCompleted(eq("tenant-1"), eq("candidate-1"), any());
     }
 
     @Test
@@ -118,7 +123,7 @@ class CandidateMigrationResilienceTest {
         assertEquals(FailureType.PERMANENT, exception.failureType());
         sap.verify();
         smartRecruiters.verify();
-        verify(migrationRecordRepository).markFailed("tenant-1", "candidate-1");
+        verify(migrationRecordRepository).markFailed(eq("tenant-1"), eq("candidate-1"), any());
     }
 
     @Test
@@ -152,8 +157,8 @@ class CandidateMigrationResilienceTest {
 
         assertEquals(FailureType.TRANSIENT, exception.failureType());
         sapServer.verify();
-        verify(migrationRecordRepository).markFailed("tenant-1", "candidate-1");
-        verify(migrationRecordRepository, never()).markCompleted("tenant-1", "candidate-1");
+        verify(migrationRecordRepository).markFailed(eq("tenant-1"), eq("candidate-1"), any());
+        verify(migrationRecordRepository, never()).markCompleted(eq("tenant-1"), eq("candidate-1"), any());
     }
 
     private String sapCandidate() {

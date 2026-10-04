@@ -7,11 +7,17 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -20,14 +26,16 @@ class SapCandidateControllerTest {
     private static final String CANDIDATE_1 = "/api/tenants/tenant-1/candidates/candidate-1";
 
     private FailureSimulator failureSimulator;
+    private List<CandidateChangedEvent> published;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         failureSimulator = new FailureSimulator();
+        published = new ArrayList<>();
         mockMvc = MockMvcBuilders
                 .standaloneSetup(
-                        new SapCandidateController(new SapCandidateStore(), failureSimulator),
+                        new SapCandidateController(new SapCandidateStore(), failureSimulator, published::add),
                         new FailureController(failureSimulator)
                 )
                 .build();
@@ -113,6 +121,57 @@ class SapCandidateControllerTest {
                 .andExpect(status().isServiceUnavailable());
         mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "2"))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void shouldStoreChangeAndPublishEvent() throws Exception {
+        mockMvc.perform(put(CANDIDATE_1)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "John", "lastName": "Doe", "email": "john.doe@example.com"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.candidate.lastName").value("Doe"))
+                .andExpect(jsonPath("$.eventId").isNotEmpty());
+
+        mockMvc.perform(get(CANDIDATE_1))
+                .andExpect(jsonPath("$.lastName").value("Doe"))
+                .andExpect(jsonPath("$.email").value("john.doe@example.com"));
+
+        assertEquals(1, published.size());
+        CandidateChangedEvent event = published.getFirst();
+        assertEquals("tenant-1", event.tenantId());
+        assertEquals("candidate-1", event.candidateId());
+        assertNotNull(event.occurredAt());
+    }
+
+    @Test
+    void shouldPublishDistinctEventForEveryChange() throws Exception {
+        for (String email : List.of("a@example.com", "b@example.com")) {
+            mockMvc.perform(put(CANDIDATE_1)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"firstName\": \"John\", \"lastName\": \"Smith\", \"email\": \"" + email + "\"}"))
+                    .andExpect(status().isOk());
+        }
+
+        assertEquals(2, published.size());
+        assertNotEquals(published.get(0).eventId(), published.get(1).eventId());
+    }
+
+    @Test
+    void shouldReturnServiceUnavailableWhenEventCannotBePublished() throws Exception {
+        mockMvc = MockMvcBuilders
+                .standaloneSetup(new SapCandidateController(new SapCandidateStore(), failureSimulator, event -> {
+                    throw new IllegalStateException("broker down");
+                }))
+                .build();
+
+        mockMvc.perform(put(CANDIDATE_1)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"firstName": "John", "lastName": "Doe", "email": "john.doe@example.com"}
+                                """))
+                .andExpect(status().isServiceUnavailable());
     }
 
     @Test

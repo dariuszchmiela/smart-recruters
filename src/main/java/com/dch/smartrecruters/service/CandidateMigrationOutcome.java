@@ -14,5 +14,12 @@ public enum CandidateMigrationOutcome {
      * Not claimed because another worker currently holds it (fresh IN_PROGRESS);
      * the result of this record is decided by that worker, not by this call.
      */
-    CLAIMED_BY_OTHER_WORKER
+    CLAIMED_BY_OTHER_WORKER,
+    /**
+     * This call claimed the record, but its claim went stale and was taken over by another worker before
+     * the record could be finished. The target call may have happened (it is idempotent), but this call
+     * neither completed nor failed the record: its outcome is decided by the new owner, as for
+     * {@link #CLAIMED_BY_OTHER_WORKER}. Never reported as {@link #MIGRATED}.
+     */
+    LEASE_LOST
 }

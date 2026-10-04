@@ -2,12 +2,13 @@ package com.dch.sapstub;
 
 import org.springframework.stereotype.Component;
 
-import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
-import java.util.function.Function;
-import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -17,8 +18,8 @@ public class SapCandidateStore {
     static final String BULK_TENANT = "tenant-bulk";
     static final int BULK_CANDIDATES = 1_050;
 
-    private final Map<Key, SapCandidate> candidates;
-    private final Map<String, List<SapCandidate>> candidatesByTenant;
+    // per tenant, ordered by candidate id: deterministic pages
+    private final Map<String, NavigableMap<String, SapCandidate>> candidatesByTenant = new ConcurrentHashMap<>();
 
     public SapCandidateStore() {
         this(Stream.concat(
@@ -34,31 +35,27 @@ public class SapCandidateStore {
     }
 
     SapCandidateStore(List<SapCandidate> candidates) {
-        this.candidates = candidates.stream()
-                .collect(Collectors.toUnmodifiableMap(
-                        candidate -> new Key(candidate.tenantId(), candidate.id()),
-                        Function.identity()
-                ));
-        // deterministic page order: candidate id
-        this.candidatesByTenant = candidates.stream()
-                .collect(Collectors.groupingBy(
-                        SapCandidate::tenantId,
-                        Collectors.collectingAndThen(
-                                Collectors.toList(),
-                                list -> list.stream().sorted(Comparator.comparing(SapCandidate::id)).toList()
-                        )
-                ));
+        candidates.forEach(this::save);
     }
 
     public Optional<SapCandidate> find(String tenantId, String candidateId) {
-        return Optional.ofNullable(candidates.get(new Key(tenantId, candidateId)));
+        return Optional.ofNullable(candidatesByTenant.getOrDefault(tenantId, new ConcurrentSkipListMap<>()).get(candidateId));
+    }
+
+    /**
+     * Creates or replaces the candidate (simulates a change in the source system).
+     */
+    public void save(SapCandidate candidate) {
+        candidatesByTenant
+                .computeIfAbsent(candidate.tenantId(), tenantId -> new ConcurrentSkipListMap<>())
+                .put(candidate.id(), candidate);
     }
 
     /**
      * Zero-based page of the tenant's candidates ordered by id. Unknown tenant = empty page.
      */
     public SapCandidatePage findPage(String tenantId, int page, int size) {
-        List<SapCandidate> all = candidatesByTenant.getOrDefault(tenantId, List.of());
+        List<SapCandidate> all = new ArrayList<>(candidatesByTenant.getOrDefault(tenantId, new ConcurrentSkipListMap<>()).values());
         long from = (long) page * size;
 
         if (from >= all.size()) {
@@ -66,7 +63,7 @@ public class SapCandidateStore {
         }
 
         int to = (int) Math.min(from + size, all.size());
-        return new SapCandidatePage(all.subList((int) from, to), page, size, to < all.size());
+        return new SapCandidatePage(List.copyOf(all.subList((int) from, to)), page, size, to < all.size());
     }
 
     /**
@@ -81,8 +78,5 @@ public class SapCandidateStore {
                         "Last" + i,
                         i % 100 == 0 ? "" : "person%05d@example.com".formatted(i)
                 ));
-    }
-
-    private record Key(String tenantId, String candidateId) {
     }
 }
