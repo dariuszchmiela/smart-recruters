@@ -6,8 +6,10 @@ import com.dch.smartrecruters.state.MigrationStatus;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.Optional;
 
 public class JdbcMigrationRecordRepository implements MigrationRecordRepository {
 
@@ -70,6 +72,32 @@ public class JdbcMigrationRecordRepository implements MigrationRecordRepository 
     @Override
     public void markFailed(String tenantId, String sourceRecordId) {
         updateStatus(tenantId, sourceRecordId, MigrationStatus.FAILED);
+    }
+
+    @Override
+    public Optional<MigrationStatus> findStatus(String tenantId, String sourceRecordId) {
+        String sql = """
+                SELECT status
+                FROM candidate_migration
+                WHERE tenant_id = ?
+                  AND source_record_id = ?
+                """;
+
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)
+        ) {
+            statement.setString(1, tenantId);
+            statement.setString(2, sourceRecordId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                        ? Optional.of(MigrationStatus.valueOf(resultSet.getString(1)))
+                        : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Cannot read migration status", e);
+        }
     }
 
     /**

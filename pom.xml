@@ -13,19 +13,6 @@
     <version>0.0.1-SNAPSHOT</version>
     <name>smart-recruters</name>
     <description>smart-recruters</description>
-    <url/>
-    <licenses>
-        <license/>
-    </licenses>
-    <developers>
-        <developer/>
-    </developers>
-    <scm>
-        <connection/>
-        <developerConnection/>
-        <tag/>
-        <url/>
-    </scm>
     <properties>
         <java.version>25</java.version>
         <resilience4j.version>2.4.0</resilience4j.version>

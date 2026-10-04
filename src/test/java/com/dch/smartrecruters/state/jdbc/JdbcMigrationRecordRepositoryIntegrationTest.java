@@ -1,5 +1,6 @@
 package com.dch.smartrecruters.state.jdbc;
 
+import com.dch.smartrecruters.state.MigrationStatus;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.flywaydb.core.Flyway;
@@ -21,6 +22,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -176,6 +178,16 @@ class JdbcMigrationRecordRepositoryIntegrationTest {
         repository.markFailed(TENANT, CANDIDATE);
 
         assertEquals("COMPLETED", status(TENANT, CANDIDATE));
+    }
+
+    @Test
+    void shouldReadCurrentStatus() throws Exception {
+        insert(TENANT, CANDIDATE, "COMPLETED", Duration.ofMinutes(1));
+        insert(TENANT, "candidate-2", "IN_PROGRESS", Duration.ofMinutes(1));
+
+        assertEquals(Optional.of(MigrationStatus.COMPLETED), repository.findStatus(TENANT, CANDIDATE));
+        assertEquals(Optional.of(MigrationStatus.IN_PROGRESS), repository.findStatus(TENANT, "candidate-2"));
+        assertEquals(Optional.empty(), repository.findStatus("tenant-2", CANDIDATE));
     }
 
     private int claimConcurrently(String tenantId, String sourceRecordId) throws Exception {
