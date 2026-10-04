@@ -8,11 +8,13 @@ import com.dch.smartrecruters.client.sap.SapCandidate;
 import com.dch.smartrecruters.client.sap.SapCandidatePage;
 import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidatePage;
 import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateRequest;
+import com.dch.smartrecruters.domain.Candidate;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.messaging.CandidateChangedEvent;
 import com.dch.smartrecruters.state.CandidateDeltaEventRepository;
 import com.dch.smartrecruters.state.DeltaEventRecord;
 import com.dch.smartrecruters.state.MigrationStatus;
+import com.dch.smartrecruters.validation.CandidateValidationException;
 import com.dch.smartrecruters.validation.CandidateValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -182,7 +184,8 @@ class CandidateDeltaServiceTest {
     @Test
     void shouldNotFailEventWhoseLeaseWasReclaimedAndNeverDeadLetterItDirectly() {
         CandidateChangedEvent event = event(TENANT, CANDIDATE);
-        IllegalArgumentException rejected = new IllegalArgumentException("rejected by target");
+        ExternalSystemException rejected = ExternalSystemException.fromHttpClientFailure(
+                "SmartRecruiters PUT candidate", FailureType.PERMANENT, new HttpClientErrorException(HttpStatus.BAD_REQUEST));
         target.onUpsert(() -> events.reclaimByOtherWorker(event.eventId()));
         target.failNext(rejected);
 
@@ -218,9 +221,30 @@ class CandidateDeltaServiceTest {
         PermanentDeltaEventException thrown =
                 assertThrows(PermanentDeltaEventException.class, () -> service.process(event));
 
-        assertInstanceOf(IllegalArgumentException.class, thrown.getCause());
+        CandidateValidationException cause = assertInstanceOf(CandidateValidationException.class, thrown.getCause());
+        assertEquals("Candidate email is required", cause.getMessage());
         assertEquals(0, target.writes);
         assertEquals(MigrationStatus.FAILED, events.status(event.eventId()));
+        assertEquals("Candidate email is required", events.get(event.eventId()).lastError());
+    }
+
+    @Test
+    void shouldKeepGenericIllegalArgumentExceptionRetryable() {
+        IllegalArgumentException bug = new IllegalArgumentException("unexpected mapping state");
+        FailingOnceMapper mapper = new FailingOnceMapper(bug);
+        service = new CandidateDeltaService(sap, mapper, new CandidateValidator(), target, events);
+        CandidateChangedEvent event = event(TENANT, CANDIDATE);
+
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> service.process(event));
+
+        // propagated unchanged, NOT classified as a permanent business failure -> Kafka retries it
+        assertSame(bug, thrown);
+        assertEquals(MigrationStatus.FAILED, events.status(event.eventId()));
+        assertEquals(0, target.writes);
+
+        // the redelivery reclaims the FAILED event and succeeds once the problem is gone
+        assertEquals(DeltaEventOutcome.PROCESSED, service.process(event));
+        assertEquals(MigrationStatus.COMPLETED, events.status(event.eventId()));
     }
 
     @Test
@@ -282,6 +306,28 @@ class CandidateDeltaServiceTest {
         assertThrows(PermanentDeltaEventException.class, () -> service.process(event(TENANT, CANDIDATE)));
 
         assertEquals(0, target.writes);
+    }
+
+    /**
+     * A mapping dependency failing with a generic IllegalArgumentException (e.g. a programming error).
+     */
+    private static final class FailingOnceMapper extends CandidateMapper {
+
+        private RuntimeException failure;
+
+        FailingOnceMapper(RuntimeException failure) {
+            this.failure = failure;
+        }
+
+        @Override
+        public Candidate map(SapCandidate source) {
+            if (failure != null) {
+                RuntimeException thrown = failure;
+                failure = null;
+                throw thrown;
+            }
+            return super.map(source);
+        }
     }
 
     private static CandidateChangedEvent event(String tenantId, String candidateId) {

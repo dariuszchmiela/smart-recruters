@@ -7,6 +7,7 @@ import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateReq
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
 import com.dch.smartrecruters.state.MigrationStatus;
+import com.dch.smartrecruters.validation.CandidateValidationException;
 import com.dch.smartrecruters.validation.CandidateValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -158,10 +159,11 @@ class CandidateMigrationServiceTest {
                 .thenReturn(true);
         SapCandidate withoutEmail = new SapCandidate("candidate-1", "tenant-1", "John", "Smith", " ");
 
-        assertThrows(
-                IllegalArgumentException.class,
+        CandidateValidationException thrown = assertThrows(
+                CandidateValidationException.class,
                 () -> service.migrateCandidate("tenant-1", withoutEmail)
         );
+        assertEquals("Candidate email is required", thrown.getMessage());
 
         verifyNoInteractions(smartRecruitersClient);
         verify(migrationRecordRepository).markFailed(eq("tenant-1"), eq("candidate-1"), any());

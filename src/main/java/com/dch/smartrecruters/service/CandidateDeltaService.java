@@ -10,6 +10,7 @@ import com.dch.smartrecruters.messaging.CandidateChangedEvent;
 import com.dch.smartrecruters.state.CandidateDeltaEventRepository;
 import com.dch.smartrecruters.state.DeltaEventRecord;
 import com.dch.smartrecruters.state.MigrationStatus;
+import com.dch.smartrecruters.validation.CandidateValidationException;
 import com.dch.smartrecruters.validation.CandidateValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,7 @@ import java.util.UUID;
  * <ul>
  *   <li>transient (HTTP retries already exhausted, open breaker, DB) - event FAILED, exception
  *       propagated as-is, Kafka redelivers the event (bounded) and the FAILED event is reclaimed</li>
- *   <li>permanent (invalid event, validation, permanent HTTP error) - event FAILED,
+ *   <li>permanent (invalid event, {@link CandidateValidationException}, permanent HTTP error) - event FAILED,
  *       {@link PermanentDeltaEventException}, no Kafka retry, dead letter topic</li>
  *   <li>lease lost (this attempt was considered stale and the event was reclaimed by another worker) -
  *       nothing is written to the inbox, {@link DeltaEventLeaseLostException}, Kafka redelivers and
@@ -125,8 +126,10 @@ public class CandidateDeltaService {
     }
 
     /**
-     * Reuses the transient/permanent classification of the HTTP layer; validation errors are permanent.
-     * Anything unknown stays retryable - Kafka retries are bounded, so it ends in the DLT at worst.
+     * Reuses the transient/permanent classification of the HTTP layer; candidate validation errors
+     * ({@link CandidateValidationException}) are permanent. Anything else - including a generic
+     * IllegalArgumentException, which may just be a programming error - stays retryable:
+     * Kafka retries are bounded, so it ends in the DLT at worst.
      */
     private static RuntimeException classify(CandidateChangedEvent event, RuntimeException e) {
         if (e instanceof PermanentDeltaEventException) {
@@ -135,7 +138,7 @@ public class CandidateDeltaService {
         if (e instanceof ExternalSystemException external && !external.isTransient()) {
             return new PermanentDeltaEventException("Permanent failure for " + describe(event), e);
         }
-        if (e instanceof IllegalArgumentException) {
+        if (e instanceof CandidateValidationException) {
             return new PermanentDeltaEventException("Invalid source data for " + describe(event), e);
         }
         return e;

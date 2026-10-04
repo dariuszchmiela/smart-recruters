@@ -6,6 +6,7 @@ import com.dch.smartrecruters.config.DeltaKafkaConfiguration;
 import com.dch.smartrecruters.service.CandidateDeltaService;
 import com.dch.smartrecruters.service.DeltaEventLeaseLostException;
 import com.dch.smartrecruters.service.PermanentDeltaEventException;
+import com.dch.smartrecruters.validation.CandidateValidationException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -150,6 +151,39 @@ class CandidateChangedListenerKafkaIntegrationTest {
         ConsumerRecord<String, String> deadLetter = awaitDeadLetter(key(candidateId));
         assertEquals(ExternalSystemException.class.getName(), header(deadLetter, "kafka_dlt-exception-cause-fqcn"));
         // first delivery + 2 Kafka retries (max-attempts=3), then no more
+        verify(deltaService, after(1_000).times(3))
+                .process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
+    }
+
+    @Test
+    void shouldSendCandidateValidationFailureToDeadLetterTopicWithoutRetry() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        String candidateId = "candidate-invalid-" + eventId;
+        // exactly what CandidateDeltaService throws for a candidate failing validation
+        doThrow(new PermanentDeltaEventException("Invalid source data for event " + eventId,
+                new CandidateValidationException("Candidate email is required")))
+                .when(deltaService).process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
+
+        send(candidateId, json(eventId, candidateId));
+
+        ConsumerRecord<String, String> deadLetter = awaitDeadLetter(key(candidateId));
+        assertEquals(PermanentDeltaEventException.class.getName(), header(deadLetter, "kafka_dlt-exception-cause-fqcn"));
+        verify(deltaService, after(1_000).times(1))
+                .process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
+    }
+
+    @Test
+    void shouldRetryGenericIllegalArgumentExceptionBoundedTimesThenDeadLetter() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        String candidateId = "candidate-bug-" + eventId;
+        doThrow(new IllegalArgumentException("unexpected mapping state"))
+                .when(deltaService).process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
+
+        send(candidateId, json(eventId, candidateId));
+
+        // not a business validation failure: retried like any unknown failure (max-attempts=3), then DLT
+        ConsumerRecord<String, String> deadLetter = awaitDeadLetter(key(candidateId));
+        assertEquals(IllegalArgumentException.class.getName(), header(deadLetter, "kafka_dlt-exception-cause-fqcn"));
         verify(deltaService, after(1_000).times(3))
                 .process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
     }
