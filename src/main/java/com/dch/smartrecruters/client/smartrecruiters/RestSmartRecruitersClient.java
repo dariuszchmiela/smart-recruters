@@ -52,4 +52,21 @@ public class RestSmartRecruitersClient implements SmartRecruitersClient {
                         .toBodilessEntity()
         );
     }
+
+    @Override
+    public SmartRecruitersCandidatePage getCandidates(String tenantId, int page, int size) {
+        SmartRecruitersCandidatePage candidates = executor.execute(
+                "SmartRecruiters GET candidates " + tenantId + " page " + page + " size " + size,
+                () -> restClient.get()
+                        .uri("/api/tenants/{tenantId}/candidates?page={page}&size={size}", tenantId, page, size)
+                        .retrieve()
+                        .body(SmartRecruitersCandidatePage.class)
+        );
+
+        if (candidates == null) {
+            throw new IllegalStateException("SmartRecruiters returned empty candidate page " + tenantId + ":" + page);
+        }
+
+        return candidates;
+    }
 }

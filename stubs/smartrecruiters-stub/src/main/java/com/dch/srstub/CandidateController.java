@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
@@ -18,6 +19,8 @@ import java.util.function.Supplier;
 @RestController
 @RequestMapping("/api/tenants/{tenantId}/candidates")
 public class CandidateController {
+
+    private static final int MAX_PAGE_SIZE = 1_000;
 
     private final CandidateStore store;
     private final FailureSimulator failureSimulator;
@@ -101,8 +104,26 @@ public class CandidateController {
         return ResponseEntity.of(store.find(tenantId, externalId));
     }
 
+    /**
+     * Unpaged listing, ordered by creation time (kept for local inspection).
+     */
     @GetMapping
     public List<StoredCandidate> getCandidates(@PathVariable String tenantId) {
         return store.findAll(tenantId);
+    }
+
+    /**
+     * Paged listing ordered by externalId. Selected when page and size are given.
+     */
+    @GetMapping(params = {"page", "size"})
+    public ResponseEntity<CandidatePage> getCandidatePage(
+            @PathVariable String tenantId,
+            @RequestParam int page,
+            @RequestParam int size
+    ) {
+        if (page < 0 || size < 1 || size > MAX_PAGE_SIZE) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(store.findPage(tenantId, page, size));
     }
 }

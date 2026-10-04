@@ -6,6 +6,7 @@ import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
 import com.dch.smartrecruters.client.sap.SapCandidate;
 import com.dch.smartrecruters.client.sap.SapCandidatePage;
+import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidatePage;
 import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateRequest;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.messaging.CandidateChangedEvent;
@@ -366,6 +367,11 @@ class CandidateDeltaServiceTest {
             }
             writes++;
             candidates.computeIfAbsent(tenantId, id -> new HashMap<>()).put(request.externalId(), request);
+        }
+
+        @Override
+        public SmartRecruitersCandidatePage getCandidates(String tenantId, int page, int size) {
+            throw new AssertionError("delta synchronization must not list target candidates");
         }
 
         SmartRecruitersCandidateRequest get(String tenantId, String externalId) {

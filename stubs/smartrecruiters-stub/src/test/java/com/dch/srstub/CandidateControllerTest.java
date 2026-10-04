@@ -128,6 +128,45 @@ class CandidateControllerTest {
     }
 
     @Test
+    void shouldPageCandidatesOrderedByExternalId() throws Exception {
+        for (String id : new String[]{"c3", "c1", "c2"}) {
+            mockMvc.perform(put("/api/tenants/tenant-1/candidates/" + id)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content("{\"firstName\": \"F\", \"lastName\": \"L\", \"email\": \"" + id + "@example.com\"}"))
+                    .andExpect(status().isCreated());
+        }
+        mockMvc.perform(put("/api/tenants/tenant-2/candidates/c0")
+                .contentType(MediaType.APPLICATION_JSON).content(JOHN.replace("candidate-1", "c0")))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items", hasSize(2)))
+                .andExpect(jsonPath("$.items[0].externalId").value("c1"))
+                .andExpect(jsonPath("$.items[1].externalId").value("c2"))
+                .andExpect(jsonPath("$.hasNext").value(true));
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "1").param("size", "2"))
+                .andExpect(jsonPath("$.items", hasSize(1)))
+                .andExpect(jsonPath("$.items[0].externalId").value("c3"))
+                .andExpect(jsonPath("$.hasNext").value(false));
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "5").param("size", "2"))
+                .andExpect(jsonPath("$.items", hasSize(0)))
+                .andExpect(jsonPath("$.hasNext").value(false));
+
+        // unpaged listing is unchanged (plain array)
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates"))
+                .andExpect(jsonPath("$", hasSize(3)));
+    }
+
+    @Test
+    void shouldRejectInvalidPageRequest() throws Exception {
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "-1").param("size", "2"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "0"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void shouldCreateCandidateAndReadItBack() throws Exception {
         mockMvc.perform(post("/api/tenants/tenant-1/candidates")
                         .contentType(MediaType.APPLICATION_JSON)

@@ -1,5 +1,6 @@
 package com.dch.smartrecruters.client;
 
+import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidatePage;
 import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateRequest;
 
 public interface SmartRecruitersClient {
@@ -21,4 +22,12 @@ public interface SmartRecruitersClient {
             String tenantId,
             SmartRecruitersCandidateRequest request
     );
+
+    /**
+     * Read-only listing for verification.
+     *
+     * @param page zero-based page number; candidates are ordered by externalId
+     * @param size maximum number of candidates on the page
+     */
+    SmartRecruitersCandidatePage getCandidates(String tenantId, int page, int size);
 }

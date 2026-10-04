@@ -6,6 +6,7 @@ import com.dch.smartrecruters.client.SapClient;
 import com.dch.smartrecruters.client.SmartRecruitersClient;
 import com.dch.smartrecruters.client.sap.SapCandidate;
 import com.dch.smartrecruters.client.sap.SapCandidatePage;
+import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidatePage;
 import com.dch.smartrecruters.client.smartrecruiters.SmartRecruitersCandidateRequest;
 import com.dch.smartrecruters.mapper.CandidateMapper;
 import com.dch.smartrecruters.state.MigrationRecordRepository;
@@ -404,6 +405,11 @@ class CandidateBatchMigrationServiceTest {
         @Override
         public void upsertCandidate(String tenantId, SmartRecruitersCandidateRequest request) {
             throw new AssertionError("initial load must use create-if-absent, not upsert");
+        }
+
+        @Override
+        public SmartRecruitersCandidatePage getCandidates(String tenantId, int page, int size) {
+            throw new AssertionError("migration must not list target candidates");
         }
     }
 

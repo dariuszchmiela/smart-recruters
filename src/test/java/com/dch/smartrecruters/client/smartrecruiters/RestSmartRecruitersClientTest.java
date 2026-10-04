@@ -13,6 +13,7 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -22,6 +23,7 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class RestSmartRecruitersClientTest {
 
@@ -123,6 +125,44 @@ class RestSmartRecruitersClientTest {
         );
 
         assertEquals(FailureType.PERMANENT, exception.failureType());
+        server.verify();
+    }
+
+    @Test
+    void shouldReadCandidatePageIgnoringTargetGeneratedFields() {
+        server.expect(requestTo(URL + "?page=1&size=2"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("""
+                        {
+                          "items": [
+                            {"id": "sr-1", "tenantId": "tenant-1", "externalId": "candidate-1", "firstName": "John",
+                             "lastName": "Smith", "email": "john@example.com",
+                             "createdAt": "2026-01-01T10:00:00Z", "updatedAt": "2026-01-01T10:00:00Z"}
+                          ],
+                          "page": 1,
+                          "size": 2,
+                          "hasNext": false
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        SmartRecruitersCandidatePage page = client.getCandidates("tenant-1", 1, 2);
+
+        assertEquals(new SmartRecruitersCandidatePage(
+                List.of(new SmartRecruitersCandidate("candidate-1", "John", "Smith", "john@example.com")), 1, 2, false
+        ), page);
+        server.verify();
+    }
+
+    @Test
+    void shouldRetryCandidatePageAfterTransientError() {
+        server.expect(once(), requestTo(URL + "?page=0&size=10"))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
+        server.expect(once(), requestTo(URL + "?page=0&size=10"))
+                .andRespond(withSuccess("""
+                        {"items": [], "page": 0, "size": 10, "hasNext": false}
+                        """, MediaType.APPLICATION_JSON));
+
+        assertEquals(List.of(), client.getCandidates("tenant-1", 0, 10).items());
         server.verify();
     }
 

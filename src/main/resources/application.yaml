@@ -39,6 +39,15 @@ migration:
   # and longer than the slowest page
   job-lease-timeout: ${MIGRATION_JOB_LEASE_TIMEOUT:10m}
   job-recovery-interval: ${MIGRATION_JOB_RECOVERY_INTERVAL:1m}
+  reconciliation:
+    # candidates per SAP / SmartRecruiters page while scanning
+    page-size: ${MIGRATION_RECONCILIATION_PAGE_SIZE:100}
+    # runs executed at the same time per instance, and how many may wait for a slot
+    max-concurrent-runs: ${MIGRATION_RECONCILIATION_MAX_CONCURRENT_RUNS:1}
+    queue-capacity: ${MIGRATION_RECONCILIATION_QUEUE_CAPACITY:100}
+    # RUNNING run without progress for this long is failed (must exceed the slowest page)
+    lease-timeout: ${MIGRATION_RECONCILIATION_LEASE_TIMEOUT:10m}
+    recovery-interval: ${MIGRATION_RECONCILIATION_RECOVERY_INTERVAL:1m}
   kafka:
     candidate-changes-topic: ${MIGRATION_KAFKA_CANDIDATE_CHANGES_TOPIC:candidate-changes}
     candidate-changes-dlt-topic: ${MIGRATION_KAFKA_CANDIDATE_CHANGES_DLT_TOPIC:candidate-changes.DLT}

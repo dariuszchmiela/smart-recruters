@@ -77,6 +77,25 @@ public class CandidateStore {
                 .toList();
     }
 
+    /**
+     * Zero-based page of the tenant's candidates ordered by externalId (deterministic).
+     * Sorts on every call - fine for a local stub.
+     */
+    public CandidatePage findPage(String tenantId, int page, int size) {
+        List<StoredCandidate> all = candidates.values().stream()
+                .filter(candidate -> candidate.tenantId().equals(tenantId))
+                .sorted(Comparator.comparing(StoredCandidate::externalId))
+                .toList();
+        long from = (long) page * size;
+
+        if (from >= all.size()) {
+            return new CandidatePage(List.of(), page, size, false);
+        }
+
+        int to = (int) Math.min(from + size, all.size());
+        return new CandidatePage(all.subList((int) from, to), page, size, to < all.size());
+    }
+
     public record CreateResult(StoredCandidate candidate, boolean created) {
     }
 
