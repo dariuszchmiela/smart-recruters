@@ -14,8 +14,10 @@ import org.springframework.web.client.RestClient;
 
 import java.net.SocketTimeoutException;
 import java.time.Duration;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.client.ExpectedCount.once;
 import static org.springframework.test.web.client.ExpectedCount.times;
@@ -64,6 +66,51 @@ class RestSapClientTest {
                 new SapCandidate("candidate-1", "tenant-1", "John", "Smith", "john@example.com"),
                 candidate
         );
+        server.verify();
+    }
+
+    @Test
+    void shouldGetCandidatePageFromSap() {
+        server.expect(requestTo("http://sap.test/api/tenants/tenant-1/candidates?page=2&size=50"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("""
+                        {
+                          "items": [%s],
+                          "page": 2,
+                          "size": 50,
+                          "hasNext": true
+                        }
+                        """.formatted(CANDIDATE_JSON), MediaType.APPLICATION_JSON));
+
+        SapCandidatePage page = client.getCandidates("tenant-1", 2, 50);
+
+        assertEquals(
+                new SapCandidatePage(
+                        List.of(new SapCandidate("candidate-1", "tenant-1", "John", "Smith", "john@example.com")),
+                        2,
+                        50,
+                        true
+                ),
+                page
+        );
+        assertEquals(3, page.nextPage());
+        server.verify();
+    }
+
+    @Test
+    void shouldRetryTransientErrorsWhenReadingPage() {
+        String pageUrl = "http://sap.test/api/tenants/tenant-1/candidates?page=0&size=10";
+        server.expect(once(), requestTo(pageUrl))
+                .andRespond(withStatus(HttpStatus.BAD_GATEWAY));
+        server.expect(once(), requestTo(pageUrl))
+                .andRespond(withSuccess("""
+                        {"items": [], "page": 0, "size": 10, "hasNext": false}
+                        """, MediaType.APPLICATION_JSON));
+
+        SapCandidatePage page = client.getCandidates("tenant-1", 0, 10);
+
+        assertEquals(List.of(), page.items());
+        assertFalse(page.hasNext());
         server.verify();
     }
 

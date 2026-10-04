@@ -30,4 +30,21 @@ public class RestSapClient implements SapClient {
 
         return candidate;
     }
+
+    @Override
+    public SapCandidatePage getCandidates(String tenantId, int page, int size) {
+        SapCandidatePage candidates = executor.execute(
+                "SAP GET candidates " + tenantId + " page " + page + " size " + size,
+                () -> restClient.get()
+                        .uri("/api/tenants/{tenantId}/candidates?page={page}&size={size}", tenantId, page, size)
+                        .retrieve()
+                        .body(SapCandidatePage.class)
+        );
+
+        if (candidates == null) {
+            throw new IllegalStateException("SAP returned empty candidate page " + tenantId + ":" + page);
+        }
+
+        return candidates;
+    }
 }

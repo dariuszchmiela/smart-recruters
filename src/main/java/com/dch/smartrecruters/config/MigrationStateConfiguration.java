@@ -1,7 +1,9 @@
 package com.dch.smartrecruters.config;
 
 import com.dch.smartrecruters.state.MigrationRecordRepository;
+import com.dch.smartrecruters.state.TenantMigrationJobRepository;
 import com.dch.smartrecruters.state.jdbc.JdbcMigrationRecordRepository;
+import com.dch.smartrecruters.state.jdbc.JdbcTenantMigrationJobRepository;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -18,5 +20,13 @@ public class MigrationStateConfiguration {
             MigrationProperties properties
     ) {
         return new JdbcMigrationRecordRepository(dataSource, properties.claimTimeout());
+    }
+
+    @Bean
+    public TenantMigrationJobRepository tenantMigrationJobRepository(
+            DataSource dataSource,
+            MigrationProperties properties
+    ) {
+        return new JdbcTenantMigrationJobRepository(dataSource, properties.jobLeaseTimeout());
     }
 }

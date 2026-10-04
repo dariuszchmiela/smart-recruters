@@ -65,6 +65,57 @@ class SapCandidateControllerTest {
     }
 
     @Test
+    void shouldReturnFirstPageOrderedByCandidateId() throws Exception {
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].id").value("candidate-1"))
+                .andExpect(jsonPath("$.items[1].id").value("candidate-2"))
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.hasNext").value(true));
+    }
+
+    @Test
+    void shouldReturnLastPage() throws Exception {
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "1").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].id").value("candidate-3"))
+                .andExpect(jsonPath("$.hasNext").value(false));
+    }
+
+    @Test
+    void shouldReturnEmptyPageBeyondLastPageAndForUnknownTenant() throws Exception {
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "5").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(0))
+                .andExpect(jsonPath("$.hasNext").value(false));
+
+        mockMvc.perform(get("/api/tenants/unknown/candidates").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(0));
+    }
+
+    @Test
+    void shouldRejectInvalidPageRequest() throws Exception {
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "-1").param("size", "2"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "0"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void shouldApplyScheduledFailureToPageRequests() throws Exception {
+        failureSimulator.schedule(FailureMode.UNAVAILABLE, 1, Duration.ZERO);
+
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "2"))
+                .andExpect(status().isServiceUnavailable());
+        mockMvc.perform(get("/api/tenants/tenant-1/candidates").param("page", "0").param("size", "2"))
+                .andExpect(status().isOk());
+    }
+
+    @Test
     void shouldReturnServiceUnavailableForScheduledNumberOfRequests() throws Exception {
         mockMvc.perform(post("/admin/failures")
                         .contentType(MediaType.APPLICATION_JSON)

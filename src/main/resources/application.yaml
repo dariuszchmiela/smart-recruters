@@ -12,6 +12,17 @@ spring:
 migration:
   # IN_PROGRESS older than this is treated as abandoned (dead worker) and can be claimed again
   claim-timeout: ${MIGRATION_CLAIM_TIMEOUT:5m}
+  # candidates per SAP page; the checkpoint of a job is a page number for this size
+  batch-size: ${MIGRATION_BATCH_SIZE:100}
+  # candidates of one job migrated at the same time (bounded virtual threads)
+  parallelism: ${MIGRATION_PARALLELISM:8}
+  # tenant jobs running at the same time in one instance, and how many may wait for a slot
+  max-concurrent-jobs: ${MIGRATION_MAX_CONCURRENT_JOBS:2}
+  job-queue-capacity: ${MIGRATION_JOB_QUEUE_CAPACITY:100}
+  # RUNNING job without progress for this long is treated as abandoned; must be >= claim-timeout
+  # and longer than the slowest page
+  job-lease-timeout: ${MIGRATION_JOB_LEASE_TIMEOUT:10m}
+  job-recovery-interval: ${MIGRATION_JOB_RECOVERY_INTERVAL:1m}
 
 clients:
   sap:
