@@ -1,564 +1,525 @@
-# SmartRecruiters Migration Lab — Full Specification
+# SmartRecruiters Migration Lab — Specification
+
+> **Status dokumentu.** Ten dokument opisuje **aktualnie zaimplementowany** migration lab.
+> Elementy projektowe, które nie istnieją w kodzie, są oznaczone wprost jako
+> **NIE ZAIMPLEMENTOWANE** (głównie w sekcjach 19–21).
+> Źródłem prawdy dla opisu bieżącego zachowania są kod, konfiguracja, migracje Flyway i testy.
+> Skrócony opis „as-built” znajduje się w `README.md`.
+
+---
 
 ## 1. Cel projektu
 
-Projekt bada projektowanie i implementację odpornej platformy migracji danych enterprise na przykładzie migracji systemu ATS (Applicant Tracking System):
+Projekt bada projektowanie i implementację odpornej platformy migracji danych enterprise:
 
-**SAP / Legacy Recruiting System → Migration Platform → SmartRecruiters**
+**SAP / legacy source system → Migration Platform → SmartRecruiters**
 
 Zakres techniczny:
-- architektura platformy migracyjnej (system design),
+- architektura platformy migracyjnej,
 - Java / Spring Boot / Kafka / PostgreSQL,
-- transakcje, idempotency, retry, resilience,
-- współbieżność i stan migracji,
+- stan migracji w bazie, idempotency, retry, resilience,
+- współbieżność (claimy, leasy, fencing),
 - strategia testów.
 
----
+Model mentalny, który porządkuje cały kod:
 
-## 2. Główne założenia
-
-Migrujemy wielu tenantów enterprise.
-
-Dane przykładowe:
-- Candidates
-- Jobs
-- Applications
-- Tenant configuration
-
-Migracja ma być:
-- restartowalna,
-- idempotentna,
-- audytowalna,
-- odporna na częściowe awarie,
-- wykonywana partiami,
-- możliwa do uruchamiania równolegle dla wielu tenantów,
-- bezpieczna dla PII,
-- rozszerzalna o delta synchronization przez Kafka.
+| Pojęcie | Znaczenie | Główne klasy |
+|---|---|---|
+| MOVE | migracja początkowa: pojedynczy kandydat lub cały tenant stronami | `CandidateMigrationService`, `CandidateBatchMigrationService` |
+| CATCH UP | dogonienie zmian w źródle przez Kafka | `CandidateChangedListener`, `CandidateDeltaService` |
+| REMEMBER | cały postęp w PostgreSQL: stan rekordów, checkpointy, inbox, leasy | `state/jdbc/*Repository` |
+| DON'T DUPLICATE | atomowe claimy + fencing token + idempotentny zapis w targecie po `tenantId + externalId` | `JdbcMigrationRecordRepository`, `JdbcCandidateDeltaEventRepository` |
+| VERIFY | niezależne porównanie source vs target | `CandidateReconciliationService` |
 
 ---
 
-## 3. Aplikacje
+## 2. Zakres zaimplementowany
 
-Repozytorium może być multi-module:
+Wykonywalny zakres obejmuje **wyłącznie kandydatów** (pola: `externalId/id`, `firstName`, `lastName`, `email`)
+dla wielu tenantów.
+
+Zaimplementowane:
+- migracja pojedynczego kandydata,
+- migracja całego tenanta stronami z checkpointem i wznawianiem,
+- ograniczona współbieżność (per strona, per instancja),
+- stan migracji, joby, inbox zdarzeń i przebiegi reconciliation w PostgreSQL,
+- atomowe claimy, leasy i fencing tokeny,
+- HTTP timeout / retry / circuit breaker per system zewnętrzny,
+- bezpieczna (PII-safe) obsługa błędów zewnętrznych,
+- delta synchronization przez Kafka z DLT,
+- reconciliation source vs target w PostgreSQL,
+- lokalne stuby SAP i SmartRecruiters z wstrzykiwaniem błędów,
+- testy z Testcontainers (PostgreSQL, Kafka).
+
+**NIE ZAIMPLEMENTOWANE:** Jobs, Applications, Tenant configuration, zależności między encjami (sekcja 21.1).
+
+---
+
+## 3. Aplikacje i struktura repozytorium
 
 ```text
-smartrecruiters-migration-lab/
-├── sap-source/
-├── migration-service/
-├── smartrecruiters-stub/
-├── docker-compose.yml
-└── README.md
+smart-recruters/
+├── pom.xml                      migration service (główna aplikacja, port 8080)
+├── src/                         kod i testy migration service
+├── stubs/
+│   ├── sap-stub/                osobny projekt Maven, port 8081
+│   └── smartrecruiters-stub/    osobny projekt Maven, port 8082
+├── docker-compose.yml           PostgreSQL 17 + Kafka 4.1 (KRaft, single node)
+├── README.md
+└── smartrecruiters-migration-lab-spec.md
 ```
 
-### 3.1 `sap-source`
+Stuby nie są modułami wspólnego buildu: każdy ma własny `pom.xml`.
 
-Symuluje stary system SAP.
+### 3.1 SAP stub (`stubs/sap-stub`)
 
-Odpowiedzialności:
-- przechowuje dane źródłowe,
-- wystawia REST API do ekstrakcji,
-- później może emitować zmiany delta.
+Symuluje system źródłowy (dane w pamięci):
+- tenanty `tenant-1`, `tenant-2` oraz generowany `tenant-bulk` (1050 kandydatów; co setny bez emaila).
 
-Przykładowe API:
+API:
 
 ```http
-GET /api/tenants/{tenantId}/candidates?page=0&size=100
 GET /api/tenants/{tenantId}/candidates/{candidateId}
-GET /api/tenants/{tenantId}/candidates?updatedSince=...
+GET /api/tenants/{tenantId}/candidates?page=0&size=100      # sortowanie po id, size ≤ 1000
+PUT /api/tenants/{tenantId}/candidates/{candidateId}        # zapis zmiany + publikacja CandidateChangedEvent
+POST/GET/DELETE /admin/failures                             # wstrzykiwanie błędów: UNAVAILABLE (503), DELAY
 ```
 
-Przykładowy model:
+Model: `SapCandidate(id, tenantId, firstName, lastName, email)`.
+
+**NIE ZAIMPLEMENTOWANE:** `updatedSince`, pola `status` / `updatedAt` w źródle.
+
+### 3.2 Migration service (repozytorium główne)
+
+Odpowiedzialności (zaimplementowane): ekstrakcja z SAP, mapping, walidacja, zapis do SmartRecruiters,
+stan migracji, checkpointy, retry, idempotency, delta synchronization, reconciliation.
+
+Przepływ dla jednego kandydata:
 
 ```text
-SapCandidate
-- id
-- tenantId
-- firstName
-- lastName
-- email
-- status
-- updatedAt
+SAP → (SapCandidate) → CandidateMapper → Candidate → CandidateValidator → CandidateMapper → SmartRecruitersCandidateRequest → SmartRecruiters
 ```
 
----
+### 3.3 SmartRecruiters stub (`stubs/smartrecruiters-stub`)
 
-### 3.2 `migration-service`
-
-Główna aplikacja.
-
-Stack:
-- Java 25
-- Spring Boot
-- Spring Data JPA
-- PostgreSQL
-- Kafka
-- Resilience4j
-- Docker
-- Testcontainers
-- OpenAPI
-- Micrometer
-
-Odpowiedzialności:
-- uruchamianie migracji tenantów,
-- extraction,
-- mapping,
-- validation,
-- load do SmartRecruiters,
-- migration state,
-- checkpoints,
-- retry,
-- idempotency,
-- audit,
-- reconciliation,
-- później delta synchronization.
-
-Główny flow:
-
-```text
-SAP
- ↓
-Extraction
- ↓
-Mapping
- ↓
-Validation
- ↓
-Load
- ↓
-SmartRecruiters
-```
-
----
-
-### 3.3 `smartrecruiters-stub`
-
-Lokalny fake target systemu SmartRecruiters.
-
-Cel:
-- bezpieczne testowanie,
-- symulowanie błędów,
-- test resilience.
-
-Przykładowe API:
+Lokalny fake targetu (dane w pamięci), tożsamość biznesowa `tenantId + externalId`:
 
 ```http
-POST /api/candidates
-GET  /api/candidates/{externalId}
+POST /api/tenants/{tenantId}/candidates                     # create-if-absent: 201 nowy, 200 istniejący (bez zmian)
+PUT  /api/tenants/{tenantId}/candidates/{externalId}        # upsert: 201 nowy, 200 zaktualizowany (to samo id)
+GET  /api/tenants/{tenantId}/candidates/{externalId}
+GET  /api/tenants/{tenantId}/candidates                     # wszystkie (bez stronicowania)
+GET  /api/tenants/{tenantId}/candidates?page=0&size=100     # sortowanie po externalId
+POST/GET/DELETE /admin/failures                             # UNAVAILABLE (503), UNAVAILABLE_AFTER_SAVE, DELAY_AFTER_SAVE
 ```
 
-Stub powinien umieć symulować:
-
-```text
-201 Created
-400 Bad Request
-409 Conflict
-429 Too Many Requests
-500 Internal Server Error
-503 Service Unavailable
-timeout
-duplicate request
-```
+`UNAVAILABLE_AFTER_SAVE` i `DELAY_AFTER_SAVE` symulują zapis, po którym odpowiedź się gubi. To jest scenariusz,
+dla którego idempotentny zapis jest niezbędny.
 
 ---
 
-## 4. Model domenowy migracji
+## 4. Stack technologiczny (z `pom.xml`)
 
-### `MigrationJob`
+- Java 25 (virtual threads),
+- Spring Boot 4.1.1: Spring MVC, `RestClient`,
+- **Spring JDBC z jawnym SQL** (`spring-boot-starter-jdbc`), PostgreSQL, Flyway,
+- Spring Kafka (JSON przez Jackson 3),
+- Resilience4j (circuit breaker); retry przez `RetryTemplate` ze Spring Framework,
+- testy: JUnit 5, Mockito, MockMvc, `MockRestServiceServer`, Testcontainers (PostgreSQL, Kafka),
+- lokalnie: `docker-compose.yml` (PostgreSQL 17, Kafka 4.1 KRaft).
 
-Jedna migracja jednego tenanta.
+**Dlaczego JDBC, a nie JPA.** Kluczowe przejścia stanu, czyli claim, przejęcie przeterminowanego leasa i fenced
+zakończenie, to pojedyncze warunkowe instrukcje SQL (`INSERT … ON CONFLICT … DO UPDATE … WHERE`,
+`UPDATE … WHERE status = ? AND lease_owner = ?`, `RETURNING`, partial unique index).
+Ich semantyka jest widoczna w kodzie i testowana na prawdziwym PostgreSQL. Projekt nie używa Spring Data JPA.
 
-```text
-id
-tenantId
-status
-currentStage
-startedAt
-completedAt
-```
-
-Statusy:
-
-```text
-NEW
-RUNNING
-PAUSED
-FAILED
-RECONCILING
-COMPLETED
-```
-
-### `MigrationBatch`
-
-Jedna partia danych.
-
-```text
-id
-migrationJobId
-entityType
-batchNumber
-status
-retryCount
-lastProcessedSourceId
-startedAt
-completedAt
-```
-
-### `MigrationRecord`
-
-Mapowanie source → target.
-
-```text
-id
-migrationJobId
-batchId
-entityType
-sourceId
-targetId
-status
-sourceVersion
-```
-
-### `AuditEvent`
-
-Append-only historia.
-
-```text
-id
-migrationJobId
-batchId
-type
-message
-createdAt
-```
+**NIE ZAIMPLEMENTOWANE w stacku:** OpenAPI, Micrometer / metryki, tracing, Actuator, Kubernetes / Helm.
 
 ---
 
-## 5. Relacje tabel
+## 5. Model danych (Flyway V1–V6)
+
+| Tabela | Migracje | Rola |
+|---|---|---|
+| `candidate_migration` | V1, V2, V5 | stan migracji kandydata. PK `(tenant_id, source_record_id)`; `status` IN_PROGRESS / COMPLETED / FAILED; `updated_at` (heartbeat leasa); `lease_owner` (fencing token) |
+| `tenant_migration_job` | V3 | job migracji tenanta. `status` PENDING / RUNNING / COMPLETED / COMPLETED_WITH_ERRORS / FAILED; `page_size`; `next_page` (checkpoint); liczniki processed / succeeded / skipped / failed; `lease_owner`; `last_error`. Partial unique index: jeden niezakończony (PENDING / RUNNING / FAILED) job na tenanta |
+| `candidate_delta_event` | V4 | inbox zdarzeń Kafka. PK `event_id`; tenant / kandydat; `status` IN_PROGRESS / COMPLETED / FAILED; `attempts`; `lease_owner`; `last_error` |
+| `reconciliation_run` | V6 | przebieg reconciliation. `status` PENDING / RUNNING / COMPLETED / FAILED; liczniki wyników; `lease_owner`; `last_error`. Partial unique index: jeden niezakończony (PENDING / RUNNING) przebieg na tenanta |
+| `candidate_reconciliation_item` | V6 | wiersze robocze. PK `(run_id, external_id)`; `source_seen`, `target_seen`, `source_fingerprint`, `target_fingerprint`, `result` |
+
+Relacje:
 
 ```text
-migration_job
-   │
-   ├──< migration_batch
-   │        │
-   │        └──< migration_record
-   │
-   └──< audit_event
+candidate_migration        (niezależna, klucz tenant + rekord)
+tenant_migration_job       (niezależna, jeden niezakończony per tenant)
+candidate_delta_event      (niezależna, klucz eventId)
+reconciliation_run ──< candidate_reconciliation_item   (ON DELETE CASCADE)
 ```
+
+Job batchowy i przebieg reconciliation są **od siebie niezależne**: zakończenie joba nie zależy od reconciliation.
+
+**NIE ZAIMPLEMENTOWANE (wcześniejszy model koncepcyjny):** `MigrationJob` ze statusami NEW / PAUSED / RECONCILING,
+`MigrationBatch` (osobna tabela partii), `MigrationRecord` z `targetId` / `sourceVersion`, `AuditEvent` / `audit_event`.
+Ich rolę pełnią dziś odpowiednio `tenant_migration_job` (checkpoint = numer strony), `candidate_migration`
+i logi aplikacji. Mapowania `sourceId → targetId` nie przechowujemy, bo target jest adresowany po `externalId`.
 
 ---
 
-## 6. Batch migration
-
-Batch służy do migracji pełnego historycznego stanu.
-
-Przykład:
+## 6. Migracja pojedynczego kandydata — `CandidateMigrationService`
 
 ```text
-tenant 471
-batch 1 → candidates 1-500
-batch 2 → candidates 501-1000
-batch 3 → candidates 1001-1500
+claim(tenantId, candidateId, leaseOwner = nowy UUID)
+   nowy rekord / FAILED / IN_PROGRESS starszy niż migration.claim-timeout → IN_PROGRESS (wygrywa jeden worker)
+→ SAP GET candidate        (w ścieżce batch pomijane: kandydat jest już na stronie)
+→ map → validate (wymagany niepusty email; błąd: CandidateValidationException)
+→ SmartRecruiters POST     (create-if-absent po tenantId + externalId)
+→ markCompleted(leaseOwner)
+błąd → markFailed(leaseOwner), wyjątek propagowany
 ```
 
-Nie używamy jednej wielkiej transakcji.
+Wyniki (`CandidateMigrationOutcome`):
+- `MIGRATED`: ta próba zapisała kandydata;
+- `ALREADY_MIGRATED`: rekord jest już COMPLETED;
+- `CLAIMED_BY_OTHER_WORKER`: świeży claim należy do innego workera;
+- `LEASE_LOST`: claim tej próby został przejęty, zanim ją zakończyła. Nigdy nie jest raportowany jako `MIGRATED`;
+  błąd takiej próby nie jest zapisywany.
 
-Schemat:
-
-```text
-TX1
-claim chunk / update state
-COMMIT
-
-HTTP calls do SmartRecruiters
-bez otwartej transakcji DB
-
-TX2
-update COMPLETED / FAILED
-COMMIT
-```
-
-Wymagania:
-- małe bounded chunks,
-- checkpoint,
-- retry tylko dla failed chunk,
-- idempotent load,
-- możliwość resume po restarcie.
+**Brak transakcji obejmującej DB i HTTP.** Claim jest osobnym, natychmiast zatwierdzonym statementem; wywołanie
+HTTP odbywa się bez otwartej transakcji. Zakończenie to kolejny statement. Crash między zapisem w targecie a
+`markCompleted` zostawia rekord IN_PROGRESS. Po `claim-timeout` rekord jest przejmowany i wysyłany ponownie, co jest
+bezpieczne dzięki idempotentnemu create po `externalId`.
 
 ---
 
-## 7. Idempotency
-
-Każdy rekord musi mieć stabilną tożsamość.
-
-Preferowany klucz:
+## 7. Batch migration tenanta — `CandidateBatchMigrationService`, `TenantMigrationJobLauncher`
 
 ```text
-tenantId + sourceRecordId
+POST /api/migrations/{tenantId}/candidates/batch → 202 + jobId
+   (nowy job PENDING albo istniejący niezakończony job tenanta)
+worker: tryClaim(job, leaseOwner)   PENDING / FAILED / RUNNING bez heartbeatu > job-lease-timeout → RUNNING
+pętla:
+   SAP GET ?page=next_page&size=page_size
+   → kandydaci strony (virtual thread per kandydat, Semaphore = migration.parallelism)
+   → CandidateMigrationService (bez ponownego pobierania z SAP)
+   → jeden UPDATE: next_page + liczniki + heartbeat, warunkowo na lease_owner
+koniec stron (hasNext=false lub pusta strona) → COMPLETED / COMPLETED_WITH_ERRORS (failed_count > 0)
 ```
 
-Przykład:
+- **Checkpoint** to numer następnej strony (`next_page`) przy stałym `page_size` joba. Jest zapisywany dopiero po
+  przetworzeniu całej strony, razem z licznikami w jednym statemencie.
+- **Restart**: crash w środku strony powoduje ponowne przetworzenie tej strony. Kandydaci już COMPLETED liczą się
+  jako `succeeded` i nie są wysyłani ponownie.
+- **Liczniki** (`processed = succeeded + skipped + failed`):
+  - `succeeded`: kandydat jest w targecie (teraz lub wcześniej);
+  - `skipped`: kandydat jest trzymany przez innego workera albo claim tej próby przejęto;
+  - `failed`: ta próba się nie powiodła.
+- **Izolacja błędów**: błąd jednego kandydata nie zatrzymuje strony ani joba.
+- **Błąd odczytu strony z SAP** → job `FAILED` z checkpointem. Ponowny `POST` dla tenanta zwraca **ten sam** job
+  i wznawia go od checkpointu.
+- **Wykonanie w tle**:
+  - stała pula wątków `migration.max-concurrent-jobs`, kolejka `migration.job-queue-capacity`;
+  - job, który się nie mieści, zostaje PENDING;
+  - recovery scan (`migration.job-recovery-interval`, start po `ApplicationReadyEvent`) uruchamia joby PENDING
+    i przejmuje porzucone RUNNING.
+- **Fencing**: po utracie leasa każdy zapis postępu zwraca `false` i worker kończy pracę.
 
-```text
-471:123
-```
+Domyślne wartości: `batch-size` 100, `parallelism` 8, `max-concurrent-jobs` 2, `job-queue-capacity` 100,
+`job-lease-timeout` 10m (musi być ≥ `claim-timeout` 5m), `job-recovery-interval` 1m.
 
-Jeśli target wspiera external ID / idempotency key:
-- używamy go.
-
-Jeśli nie:
-- zapisujemy mapowanie `sourceId → targetId` lokalnie.
-
-Cel:
-
-```text
-ten sam request 2 razy
-→ jeden efekt biznesowy
-```
+**NIE ZAIMPLEMENTOWANE:** retry pojedynczej partii jako osobnej encji, pause / resume, chunk tables,
+paginacja keyset (`lastProcessedSourceId`).
 
 ---
 
-## 8. Concurrency
+## 8. Idempotency
 
-Nie używamy JVM-only locking jako głównego zabezpieczenia, bo aplikacja może działać na wielu podach.
+| Ścieżka | Klucz idempotencji | Mechanizm |
+|---|---|---|
+| migracja początkowa | `tenantId + sourceRecordId` | rekord `candidate_migration`; COMPLETED nigdy nie jest przetwarzany ponownie |
+| delta | `eventId` | rekord `candidate_delta_event`; COMPLETED oznacza duplikat, który jest ignorowany |
+| target | `tenantId + externalId` | POST = create-if-absent, PUT = upsert. Bez duplikatów także przy retry po zgubionej odpowiedzi |
 
-Preferowany claim:
+Delta **nie** używa `candidate_migration` jako idempotencji: ten sam kandydat zmienia się wielokrotnie,
+a każde zdarzenie (inny `eventId`) jest poprawne i przetwarzane.
+
+---
+
+## 9. Współbieżność: claimy, leasy, fencing
+
+Aplikacja może działać w wielu instancjach, więc nie używamy blokad JVM jako zabezpieczenia.
+
+- **Claim**: jeden atomowy statement, np. dla `candidate_migration`:
 
 ```sql
-UPDATE candidate_migration
-SET status = 'IN_PROGRESS'
-WHERE id = ?
-  AND status = 'NEW';
+INSERT INTO candidate_migration (tenant_id, source_record_id, status, lease_owner, updated_at)
+VALUES (?, ?, 'IN_PROGRESS', ?, now())
+ON CONFLICT (tenant_id, source_record_id)
+DO UPDATE SET status = 'IN_PROGRESS', lease_owner = EXCLUDED.lease_owner, updated_at = now()
+WHERE candidate_migration.status = 'FAILED'
+   OR (candidate_migration.status = 'IN_PROGRESS'
+       AND candidate_migration.updated_at < now() - (? * INTERVAL '1 millisecond'))
 ```
 
-Interpretacja:
+  Zmieniony 1 wiersz oznacza, że worker zdobył pracę; 0 wierszy, że pracę ma ktoś inny albo jest już zakończona.
+  Czas pochodzi z zegara bazy (`now()`).
 
-```text
-updated rows = 1 → worker zdobył pracę
-updated rows = 0 → ktoś inny już ją przejął
-```
+- **Fencing**: każdy claim zapisuje nowy `lease_owner` (UUID per próba). Zakończenie wymaga
+  `status = 'IN_PROGRESS' AND lease_owner = ?`. Worker, którego lease przejęto, nie może zmienić wyniku.
+  Ten sam wzorzec mają `candidate_delta_event`, `tenant_migration_job` i `reconciliation_run`.
+- **Jeden niezakończony job / przebieg na tenanta**: partial unique index + `INSERT … ON CONFLICT DO NOTHING`.
+- Każda z tych reguł jest testowana równoległymi workerami na prawdziwym PostgreSQL (Testcontainers).
 
-Dla prostych state transitions preferujemy atomic update.
-
-Alternatywy:
-- optimistic locking `@Version`,
-- pessimistic locking,
-- distributed lock tylko jeśli naprawdę potrzebny.
+Ograniczenie: fencing chroni stan w bazie, a nie wysłany już request HTTP (sekcja 18).
 
 ---
 
-## 9. Delta synchronization
+## 10. Delta synchronization (Kafka)
 
-Po rozpoczęciu batch migration SAP może nadal się zmieniać.
-
-Definiujemy:
+Batch nie wystarcza, bo źródło zmienia się w trakcie migracji. Ścieżka delta dogania te zmiany.
 
 ```text
-T0 = migration cutover point
+SAP stub PUT candidate → topic candidate-changes (key tenantId:candidateId)
+  → CandidateChangedListener (cienki adapter) → CandidateDeltaService
+       → claim eventId w candidate_delta_event (lease_owner)
+       → SAP GET aktualny stan kandydata
+       → map → validate → SmartRecruiters PUT (upsert)
+       → markCompleted(lease_owner)
 ```
 
-```text
-stan do T0 → Batch
-zmiany po T0 → Delta
-```
+- **Zdarzenie**: `CandidateChangedEvent { eventId, tenantId, candidateId, occurredAt }`. Zawiera tylko tożsamość:
+  dane zawsze pobieramy aktualne z SAP, więc duplikaty zbiegają do bieżącego stanu źródła. Format to zwykły
+  JSON bez nagłówków typu.
+- **Dostarczanie at-least-once.** Poprawność zapewniają inbox po `eventId`, fenced zakończenie i idempotentny upsert.
+  Nie ma exactly-once.
+- **Claim nieudany**:
+  - COMPLETED → ignorowany duplikat;
+  - świeży IN_PROGRESS → `DeltaEventInProgressException` (retryable);
+  - `eventId` zapisany dla innego tenanta / kandydata → błąd trwały.
+- Zdarzenie **FAILED** jest przejmowane przy ponownym dostarczeniu.
+- **Klasyfikacja błędów**:
+  - trwałe (`CandidateValidationException`, trwały błąd HTTP, niekompletne lub niespójne zdarzenie) →
+    `PermanentDeltaEventException`;
+  - utrata leasa → `DeltaEventLeaseLostException` (retryable). Oryginalny błąd jest dołączony jako suppressed,
+    a nie jako cause;
+  - pozostałe, w tym zwykły `IllegalArgumentException`, są retryable.
+- **Retry Kafka** (`DefaultErrorHandler`):
+  - **blokujące** ponowienia na wątku konsumenta z wykładniczym back-off (`migration.kafka.retry-*`: 1s, ×2, max 10s);
+  - maksymalnie `migration.kafka.max-attempts` (domyślnie 3) dostarczeń, potem `candidate-changes.DLT`;
+  - `PermanentDeltaEventException` i błędy deserializacji trafiają do DLT od razu.
+  - Retry Kafka jest oddzielone od retry HTTP: jedno dostarczenie obejmuje już ponowienia HTTP.
+- **Kolejność**: per klucz partycji `tenantId:candidateId`. Blokujące retry zachowują kolejność w partycji.
+- **Konsument**: grupa `migration-service`, `ack-mode: record`, `concurrency` 3, 3 partycje (topiki tworzone przez aplikację).
 
-Preferencje źródła zmian:
-
-```text
-1. Domain events
-2. CDC
-3. Polling po updatedAt + stable ID
-```
+**NIE ZAIMPLEMENTOWANE:** `processed_event` (zastąpione przez `candidate_delta_event`), retry topics
+(nieblokujące), entity version / sequence number (ochrona przed out-of-order), domain events / CDC / outbox po stronie
+źródła, polling po `updatedAt`, topiki dla innych encji (`job-changes` itd.), narzędzie do replay DLT,
+propagacja usunięć.
 
 ---
 
-## 10. Kafka
+## 11. Retry / timeout / circuit breaker
 
-Kafka służy głównie do delta path.
-
-```text
-SAP changes
- ↓
-Events / CDC
- ↓
-Kafka
- ↓
-Delta Processor
- ↓
-SmartRecruiters
-```
-
-Przykładowe topics:
+Każde wywołanie SAP i SmartRecruiters przechodzi przez `ExternalCallExecutor`:
 
 ```text
-candidate-changes
-job-changes
-application-changes
-tenant-config-changes
+CircuitBreaker (jeden na system zewnętrzny) → Retry (tylko transient) → HTTP (connect/read timeout)
 ```
 
-Partition key:
+- Jedno wywołanie biznesowe to jeden wynik circuit breakera, niezależnie od liczby ponowień.
+- **Transient** (`HttpFailureClassifier`, dokładnie):
+  - HTTP **408, 429, 502, 503, 504**;
+  - błędy I/O bez odpowiedzi (timeout, connection refused / reset).
+- **Permanent**: wszystkie pozostałe statusy, w tym 400, 401, 403, 404, 409, 422 oraz **500**. Traktowanie 500 jako
+  trwałego to obecna polityka projektu. Błędy trwałe nie są ponawiane i nie liczą się jako porażki breakera.
+- **Retry HTTP** (`clients.retry.*`): 3 próby, back-off 200 ms, ×2, max 2 s. Wykładniczy, **bez jittera**.
+- **Timeout** (`clients.{sap,smartrecruiters}.*`): connect 1 s, read 3 s.
+- **Circuit breaker** (`clients.circuit-breaker.*`): okno count-based 10, min. 5 wywołań, próg 50 %, 30 s w OPEN,
+  2 wywołania w HALF_OPEN. OPEN oznacza fail-fast (transient) bez wysyłania żądania HTTP.
 
-```text
-tenantId + entityId
-```
-
-Cel:
-- ordering dla jednej encji,
-- równoległość między encjami.
-
-Consumer group:
-
-```text
-candidate-migration
-```
-
-Wymagania:
-- at-least-once delivery,
-- idempotent consumer,
-- eventId,
-- entity version / sequence number,
-- retry topic,
-- DLQ.
+**NIE ZAIMPLEMENTOWANE:** jitter, rate limiter.
 
 ---
 
-## 11. Processed events
+## 12. Backpressure
 
-Tabela:
+Zaimplementowane ograniczenia:
+- `migration.parallelism`: kandydaci przetwarzani jednocześnie w jednym jobie (virtual threads + `Semaphore`;
+  same virtual threads nie ograniczają współbieżności);
+- `migration.max-concurrent-jobs` + `job-queue-capacity`: joby na instancję;
+- `migration.reconciliation.max-concurrent-runs` + `queue-capacity`: przebiegi reconciliation na instancję;
+- `migration.batch-size` / `migration.reconciliation.page-size`: rozmiar strony w pamięci;
+- `spring.kafka.listener.concurrency`: konsumenci delta;
+- circuit breaker, który chroni niedostępny system.
 
-```text
-processed_event
-- eventId
-- processedAt
-```
-
-Consumer:
-
-```text
-event przychodzi
- ↓
-eventId istnieje?
- ├─ tak → ignore
- └─ nie
-      ↓
-   update entity
-      ↓
-   save processed_event
-      ↓
-   COMMIT
-```
-
-`entity version` chroni przed out-of-order events.
+**NIE ZAIMPLEMENTOWANE:** globalny / per-tenant rate limiter ruchu wychodzącego, monitoring consumer lag.
 
 ---
 
-## 12. Retry / timeout / circuit breaker
+## 13. Mapping i walidacja
 
-### Timeout
-
-Dla HTTP:
-- connect timeout,
-- response timeout.
-
-### Retry
-
-Tylko transient errors:
+Zaimplementowane warstwy (anti-corruption layer w minimalnej formie):
 
 ```text
-429
-502
-503
-504
-timeout
+SapCandidate (model źródła) → Candidate (model kanoniczny) → SmartRecruitersCandidateRequest (model targetu)
 ```
 
-Nie retryujemy automatycznie:
+- `CandidateMapper` kopiuje `id → externalId`, `firstName`, `lastName` i `email` bez transformacji.
+- `CandidateValidator` ma jedną regułę: niepusty email. Naruszenie zgłasza `CandidateValidationException`
+  (kontrolowany komunikat, bez danych kandydata).
+- Spójność tenanta w ścieżce delta i reconciliation: rekord ze źródła musi należeć do przetwarzanego tenanta.
 
-```text
-400
-401
-403
-validation errors
-```
-
-Retry:
-- bounded,
-- exponential backoff,
-- jitter.
-
-### Circuit breaker
-
-Stany:
-
-```text
-CLOSED
-OPEN
-HALF_OPEN
-```
-
-Cel:
-- nie dobijać niedostępnego targetu.
+**NIE ZAIMPLEMENTOWANE:** mapowanie statusów / enumów, walidacja formatu email, dozwolone wartości,
+integralność referencyjna między encjami.
 
 ---
 
-## 13. Backpressure
+## 14. Reconciliation
 
-Migration Service nie może generować większego ruchu niż target przyjmie.
+Sukces zapisu nie jest dowodem sukcesu migracji. Reconciliation niezależnie porównuje źródło i target.
 
-Mechanizmy:
-- concurrency limit,
-- bounded executor,
-- rate limiter,
-- batch size,
-- consumer lag monitoring.
+```text
+POST /api/reconciliation/{tenantId}/candidates → 202 + runId
+worker: claim run (PENDING → RUNNING, lease_owner)
+  → SAP strony:            CandidateMapper → CandidateFingerprint → batch upsert (source_seen, source_fingerprint)
+  → SmartRecruiters strony: CandidateFingerprint                 → batch upsert (target_seen, target_fingerprint)
+  → jedna transakcja: klasyfikacja wszystkich wierszy w SQL + liczniki → COMPLETED
+błąd → FAILED (wiersze robocze zostają do diagnozy)
+```
 
-Virtual threads mogą obsługiwać blocking I/O, ale nie usuwają potrzeby limitowania concurrency.
+- **Pamięć**: w aplikacji jest najwyżej jedna strona. Logika zbiorowa (obecność po obu stronach, równość,
+  liczniki) działa w PostgreSQL.
+- **Wyniki**:
+  - `MATCHED`: po obu stronach, równe fingerprinty;
+  - `MISMATCHED`: po obu stronach, różne fingerprinty;
+  - `MISSING_IN_TARGET`: tylko w źródle;
+  - `UNEXPECTED_IN_TARGET`: tylko w targecie.
+- **Fingerprint** (`CandidateFingerprint`): SHA-256 z wersjonowanej, length-prefixed postaci kanonicznej
+  pól `externalId, firstName, lastName, email`.
+  - Kanonizacja: Unicode NFC, `String.strip()`, null == blank, **bez case folding**.
+  - Równe fingerprinty są traktowane jako równoważność w sensie tych reguł (kolizje SHA-256 uznane za pomijalne),
+    a nie jako identyczność znak po znaku.
+- **Niezależność**:
+  - `candidate_migration` nie jest odczytywane;
+  - oba systemy są tylko czytane;
+  - `CandidateValidator` celowo nie jest stosowany. Kandydat, którego migracja by odrzuciła, wychodzi jako
+    `MISSING_IN_TARGET`, albo jako `MATCHED`, jeśli równoważny kandydat już jest w targecie.
+- **Jeden niezakończony przebieg na tenanta.** Przebiegi nie są wznawiane: porzucony RUNNING (brak heartbeatu przez
+  `migration.reconciliation.lease-timeout`) staje się FAILED, a nowy przebieg zaczyna od zera.
+- **Model spójności**: eventually-consistent verification pass, nie rozproszony snapshot. Konsumenci Kafka działają
+  dalej, więc zmiana w trakcie skanu może dać przejściową różnicę. Reconciliation uruchamia się po migracji
+  początkowej i ponownie po opróżnieniu backlogu delta, do uzyskania stabilnego wyniku.
+- **PII**: w tabelach reconciliation są tylko identyfikatory i fingerprinty.
+- Zakończenie joba batchowego **nie** zależy od reconciliation; to niezależne procesy.
 
 ---
 
-## 14. Mapping i validation
+## 15. REST API migration service (port 8080)
 
-Przykład:
-
-```text
-SAP.status = ACTIVE_INTERNAL
-        ↓
-InternalStatus.ACTIVE
-        ↓
-SmartRecruiters.state = IN_PROCESS
+```http
+POST /api/migrations/{tenantId}/candidates/{candidateId}       # migracja jednego kandydata, synchronicznie, 204
+POST /api/migrations/{tenantId}/candidates/batch               # start (lub istniejący niezakończony) jobu, 202 + Location
+GET  /api/migrations/jobs/{jobId}                              # status, checkpoint, liczniki
+POST /api/reconciliation/{tenantId}/candidates                 # start (lub istniejący niezakończony) przebiegu, 202 + Location
+GET  /api/reconciliation/runs/{runId}                          # status i liczniki
+GET  /api/reconciliation/runs/{runId}/items?result=&page=0&size=100
+     # elementy zakończonego przebiegu; size ≤ 1000; bez result: wszystkie różnice; 409 gdy przebieg nie jest COMPLETED
 ```
 
-Rozdzielamy:
-- source adapter,
-- internal migration model,
-- target adapter.
+Przykładowa odpowiedź `GET /api/migrations/jobs/{jobId}`:
 
-Warstwa ACL:
-
-```text
-SAP model
- ↓
-SAP Adapter
- ↓
-Internal Model
- ↓
-SmartRecruiters Adapter
- ↓
-SmartRecruiters model
+```json
+{
+  "jobId": "…", "tenantId": "tenant-bulk", "status": "COMPLETED_WITH_ERRORS",
+  "pageSize": 100, "nextPage": 11,
+  "processedCount": 1050, "succeededCount": 1040, "skippedCount": 0, "failedCount": 10,
+  "lastError": null, "createdAt": "…", "updatedAt": "…"
+}
 ```
 
-Validation:
-- required fields,
-- allowed enum values,
-- format email,
-- referential integrity,
-- tenant consistency.
+Ścieżka delta nie ma endpointu REST: steruje nią topic Kafka.
+
+**NIE ZAIMPLEMENTOWANE:** `pause`, `resume`, lista partii, endpoint błędów, lista jobów tenanta, dedykowane
+mapowanie błędów endpointu synchronicznego (używana jest domyślna obsługa Springa).
 
 ---
 
-## 15. Zależności encji
+## 16. Bezpieczeństwo
 
-Przykład:
+Zaimplementowane w kodzie:
+- **PII-safe błędy zewnętrzne**: `ExternalSystemException` zawiera tylko operację, typ błędu (TRANSIENT / PERMANENT),
+  kategorię (`HTTP_RESPONSE`, `TIMEOUT`, `TRANSPORT_ERROR`, `INVALID_RESPONSE`, `CIRCUIT_OPEN`) i status HTTP.
+  - Treść odpowiedzi upstream ani surowy wyjątek HTTP nie trafiają do komunikatów, łańcucha przyczyn, logów,
+    `last_error` ani nagłówków DLT.
+  - Pokrywają to testy z wartownikiem (sentinel PII w treści odpowiedzi).
+- Kontrolowane komunikaty walidacji, bez wartości pól kandydata.
+- Brak danych kandydata w tabelach reconciliation; zdarzenia Kafka niosą tylko identyfikatory.
+- Izolacja tenantów w kluczach stanu i w sprawdzeniach spójności (sekcja 17).
+- Sekrety połączeń przez zmienne środowiskowe (`DB_PASSWORD` itd.); w repozytorium są tylko lokalne wartości domyślne.
+
+Wymagania środowiska produkcyjnego (**NIE ZAIMPLEMENTOWANE / poza repozytorium**): TLS, szyfrowanie at rest,
+zarządzanie sekretami, least privilege, audit trail, polityka retencji, procesy GDPR.
+
+---
+
+## 17. Multi-tenancy
+
+Zaimplementowane:
+- `tenant_id` w kluczu stanu kandydata i zdarzeń; przebiegi i joby są per tenant;
+- ten sam identyfikator w dwóch tenantach to zawsze dwa niezależne rekordy (testy);
+- delta: `eventId` zapisany dla innego tenanta nie może być przejęty; rekord SAP innego tenanta nie jest zapisywany;
+- reconciliation: kandydat innego tenanta w odpowiedzi SAP przerywa przebieg.
+
+Zasada: samo `tenant_id` w tabeli nie rozwiązuje multi-tenancy.
+
+**NIE ZAIMPLEMENTOWANE:** credentials per tenant, rate limits per tenant, konfiguracja mapowania per tenant.
+
+---
+
+## 18. Ograniczenia i świadome kompromisy
+
+- **Paginacja offsetowa** (numer strony) na żywych danych: strony mogą się przesuwać. Rekord może zostać przeczytany
+  dwa razy (nieszkodliwe) albo pominięty w danym przebiegu.
+- Reconciliation nie jest snapshotem; przebiegi nie są wznawiane; wiersze robocze nie mają retencji.
+- Fencing nie cofa wysłanego już requestu HTTP starego workera. Dla create-if-absent jest to nieszkodliwe;
+  dla upsert w delta koryguje to następne zdarzenie.
+- Delta bez wersji / sekwencji źródła: dwa równoległe przetworzenia tego samego kandydata (np. rebalance)
+  mogą zapisać starszy odczyt jako ostatni.
+- Emisja zdarzeń w SAP stub nie jest outboxem (zapis, potem publikacja; przy błędzie publikacji 503).
+- Retry Kafka blokuje partycję na czas back-off (ograniczone `max-attempts`).
+- Brak narzędzia do replay DLT i brak propagacji usunięć.
+- Brak globalnego limitu ruchu wychodzącego.
+- Obserwowalność ograniczona do logów.
+
+---
+
+## 19. Obserwowalność
+
+Zaimplementowane: logi SLF4J z identyfikatorami jobu / przebiegu / zdarzenia i tenanta, wynikami skanów
+i bezpiecznymi komunikatami błędów.
+
+**NIE ZAIMPLEMENTOWANE (przyszłe utwardzenie):**
+- metryki (np. Micrometer): `records_processed_total`, `records_failed_total`, `retry_count`, `dlq_size`,
+  `consumer_lag`, `reconciliation_mismatches`, `target_api_latency`;
+- tracing (extraction → mapping → validation → load);
+- dashboardy, health / Actuator, structured logging (JSON).
+
+---
+
+## 20. Deployment
+
+Zaimplementowane: `docker-compose.yml` uruchamia PostgreSQL 17 i Kafka 4.1 (KRaft). Migration service i stuby
+uruchamia się Mavenem (`mvn spring-boot:run`) albo jako jary. Szczegóły są w `README.md`.
+
+**NIE ZAIMPLEMENTOWANE (możliwy kierunek produkcyjny):** obrazy kontenerów usług, Kubernetes / Helm, np. EKS z
+osobnymi deploymentami (API, batch worker, delta processor, reconciliation worker), RDS PostgreSQL, MSK;
+rolling / canary deployment; reguły kompatybilności schematu DB i zdarzeń. Obecnie wszystkie role działają w
+jednej aplikacji.
+
+---
+
+## 21. Przyszłe rozszerzenia (NIE ZAIMPLEMENTOWANE)
+
+### 21.1 Kolejne encje
 
 ```text
 Candidate ─┐
@@ -566,363 +527,91 @@ Candidate ─┐
 Job ───────┘
 ```
 
-Candidate i Job mogą migrować równolegle.
+Candidate i Job mogłyby migrować równolegle. Application dopiero po migracji obu i zapisaniu mapowań
+source → target. Dla takich zależności potrzebne byłoby przechowywanie `targetId`.
 
-Application dopiero po:
-- Candidate migrated,
-- Job migrated,
-- source → target IDs zapisane.
+### 21.2 Utwardzenie delta / Kafka
+- entity version / sequence number ze źródła (odrzucanie out-of-order),
+- nieblokujące retry topics,
+- outbox / CDC po stronie źródła, polling `updatedSince` jako fallback,
+- replay DLT, propagacja usunięć.
 
----
+### 21.3 Operacje
+- pause / resume jobów, lista błędów per job, audit trail,
+- uzależnienie „cutover ready” od stabilnego wyniku reconciliation (obecnie job i reconciliation są niezależne),
+- paginacja keyset, wznawianie reconciliation, retencja wierszy roboczych,
+- rate limiter per tenant / globalny.
 
-## 16. Reconciliation
+### 21.4 AI-assisted migration (wyłącznie koncepcja)
 
-Load success ≠ migration success.
-
-Reconciliation porównuje source i target.
-
-Przykład:
-
-```text
-SAP Candidates              120000
-SmartRecruiters Candidates  120000  ✅
-
-SAP Applications            870000
-SmartRecruiters Applications 869997 ❌
-```
-
-Sprawdzamy:
-- counts,
-- external IDs,
-- checksums,
-- versions,
-- missing records,
-- duplicates.
-
-MigrationJob może przejść do `COMPLETED` dopiero po reconciliation.
-
----
-
-## 17. REST API migration-service
-
-Przykładowe API:
-
-```http
-POST /api/migrations/{tenantId}
-POST /api/migrations/{tenantId}/pause
-POST /api/migrations/{tenantId}/resume
-
-GET /api/migrations/{tenantId}
-GET /api/migrations/{tenantId}/batches
-GET /api/migrations/{tenantId}/errors
-```
-
-Przykładowa odpowiedź:
-
-```json
-{
-  "tenantId": 471,
-  "status": "RUNNING",
-  "currentStage": "LOAD",
-  "processed": 15000,
-  "failed": 7
-}
-```
-
----
-
-## 18. Security
-
-Dane:
-- Candidates,
-- CV,
-- email,
-- phone,
-- employment history.
-
-Wymagania:
-- HTTPS/TLS,
-- encryption at rest,
-- secrets poza kodem,
-- least privilege,
-- tenant isolation,
-- audit,
-- brak PII w zwykłych logach,
-- retention policy,
-- GDPR.
-
----
-
-## 19. Observability
-
-Metrics:
+AI mogłoby proponować mapping pól, wykrywać podobne schematy, sugerować transformacje, wykrywać anomalie
+i wspierać operatora. Nie powinno samodzielnie wykonywać nieodwracalnych zmian, zatwierdzać mappingów o niskiej
+pewności, robić cutoveru ani nadpisywać deterministycznych reguł bez audytu. Proponowany flow:
 
 ```text
-migrations_running
-migrations_failed
-records_processed_total
-records_failed_total
-batch_duration
-retry_count
-dlq_size
-consumer_lag
-reconciliation_mismatches
-target_api_latency
-```
-
-Każdy log powinien zawierać:
-
-```text
-tenantId
-migrationJobId
-batchId
-entityType
-sourceRecordId
-```
-
-Tracing:
-
-```text
-Extraction
-→ Mapping
-→ Validation
-→ Load
-→ SmartRecruiters
+schema comparison → AI suggestion → human review → approved deterministic rule → migration
 ```
 
 ---
 
-## 20. Deployment
+## 22. Testy (stan obecny)
 
-AWS:
+- **Unit**: mapper, walidator, klasyfikacja błędów HTTP, fingerprint, sanitizacja błędów.
+- **Klienci HTTP**: `MockRestServiceServer` (retry, brak retry dla błędów trwałych); timeout na prawdziwym serwerze
+  loopback; circuit breaker z kontrolowanym zegarem.
+- **Integracyjne (Testcontainers PostgreSQL)**: claimy, przejęcie leasa i fencing przy równoległych workerach,
+  checkpointy jobów, inbox delta, SQL reconciliation.
+- **Integracyjne (Testcontainers Kafka)**: dostarczenie JSON, ograniczone retry, błąd trwały → DLT,
+  nieczytelny payload → DLT, `IllegalArgumentException` retryable, utrata leasa retryable.
+- **Serwisowe z fake'ami w pamięci**: stronicowanie batch, crash przed checkpointem i replay, utrata leasa,
+  limit współbieżności, idempotency delta, izolacja tenantów.
+- **Kontrolery**: MockMvc.
+- **Stuby**: własne testy (`mvn -f stubs/<stub>/pom.xml test`).
+- **Test kontekstu aplikacji**: pełny kontekst na Testcontainers PostgreSQL ze wszystkimi migracjami Flyway,
+  bez potrzeby lokalnego PostgreSQL ani Kafka (wymaga Dockera).
 
-```text
-EKS
-├── migration-api
-├── batch-worker
-├── delta-processor
-└── reconciliation-worker
+Uruchomienie: `mvn test` (zwykły Maven).
 
-RDS PostgreSQL
-
-Kafka / MSK
-```
-
-Deployment:
-- rolling,
-- canary,
-- backward-compatible DB schema,
-- backward-compatible event schema.
-
----
-
-## 21. Multi-tenancy
-
-Tenant context musi być propagowany end-to-end.
-
-Każdy rekord migracyjny:
-
-```text
-tenantId
-```
-
-Izolujemy:
-- credentials,
-- state,
-- audit,
-- rate limits,
-- target mapping.
-
-Nigdy nie zakładamy, że `tenant_id` w jednej tabeli sam rozwiązuje cały problem multi-tenancy.
+**NIE ZAIMPLEMENTOWANE:** automatyczny test end-to-end uruchamiający wszystkie trzy aplikacje razem
+(taki przebieg wykonywano ręcznie na lokalnym stacku).
 
 ---
 
-## 22. AI-assisted migration
+## 23. Status milestone'ów
 
-AI może:
-- proponować mapping pól,
-- wykrywać podobne schematy,
-- sugerować transformacje,
-- wykrywać anomalie,
-- wspierać operatora.
-
-AI nie powinno samodzielnie:
-- wykonywać nieodwracalnych zmian,
-- usuwać PII,
-- zatwierdzać low-confidence mappingów,
-- robić cutoveru,
-- nadpisywać deterministycznych reguł bez audytu.
-
-Preferowany flow:
-
-```text
-schema comparison
- ↓
-AI suggestion
- ↓
-human review
- ↓
-approved deterministic rule
- ↓
-migration
-```
+| Milestone | Status |
+|---|---|
+| 1. Happy path: SAP stub, SmartRecruiters stub, mapping, validation, load | zrobione |
+| 2. Stan migracji: PostgreSQL, checkpoint, resume | zrobione (`candidate_migration`, `tenant_migration_job`; bez `MigrationBatch` / `AuditEvent`) |
+| 3. Resilience: timeout, retry, backoff, circuit breaker, idempotency | zrobione (bez jittera) |
+| 4. Concurrency: atomic claim, równoległe workery, limit współbieżności, virtual threads | zrobione (+ leasy i fencing) |
+| 5. Kafka delta: candidate-changes, eventId, idempotent consumer, DLQ | zrobione (DLT; bez entity version i retry topics) |
+| 6. Reconciliation: liczniki, brakujące ID, raport różnic | zrobione (fingerprinty w PostgreSQL) |
+| 7. Observability: metrics, structured logs, tracing, dashboards | nie zrobione (tylko logi) |
+| 8. Deployment: docker-compose / Kubernetes / AWS | częściowo (docker-compose dla infrastruktury) |
 
 ---
 
-## 23. Testy
-
-### Unit
-- mapper,
-- validator,
-- domain rules,
-- retry classification.
-
-### Integration
-Testcontainers:
-- PostgreSQL,
-- Kafka.
-
-Testujemy:
-- JPA mappings,
-- transactions,
-- locking,
-- Kafka serialization,
-- consumer,
-- processed_event,
-- retry/DLQ.
-
-### Component / end-to-end
-
-```text
-SAP Stub
- ↓
-Migration Service
- ↓
-SmartRecruiters Stub
-```
-
-Scenariusze:
-- happy path,
-- timeout,
-- duplicate,
-- retry,
-- restart,
-- partial failure,
-- reconciliation mismatch.
-
----
-
-## 24. Milestones implementacji
-
-### Milestone 1 — najprostszy happy path
-- `sap-source`
-- `smartrecruiters-stub`
-- `migration-service`
-- GET candidates
-- POST candidate
-- mapping
-- validation
-- load
-
-### Milestone 2 — migration state
-- MigrationJob
-- MigrationBatch
-- MigrationRecord
-- PostgreSQL
-- checkpoint
-- resume
-
-### Milestone 3 — resilience
-- timeout
-- retry
-- backoff
-- circuit breaker
-- idempotency
-
-### Milestone 4 — concurrency
-- atomic claim
-- parallel workers
-- concurrency limit
-- virtual threads
-
-### Milestone 5 — Kafka delta
-- candidate-changes
-- eventId
-- version
-- idempotent consumer
-- retry topic
-- DLQ
-
-### Milestone 6 — reconciliation
-- count comparison
-- missing IDs
-- mismatch report
-
-### Milestone 7 — observability
-- metrics
-- structured logs
-- tracing
-- dashboards
-
-### Milestone 8 — deployment
-- Docker
-- docker-compose
-- Kubernetes manifests / Helm
-- AWS mapping
-
----
-
-## 25. Pierwszy krok implementacyjny
-
-Nie zaczynamy od Kafka ani Kubernetes.
-
-Pierwszy działający flow:
-
-```text
-sap-source
-GET /api/tenants/{tenantId}/candidates
-
-        ↓
-
-migration-service
-GET source
-→ map
-→ validate
-→ POST target
-
-        ↓
-
-smartrecruiters-stub
-POST /api/candidates
-```
-
-Gdy to działa end-to-end, dokładamy stan migracji i kolejne mechanizmy.
-
----
-
-## 26. Zasady rozwoju projektu
+## 24. Zasady rozwoju projektu
 
 - małe, inkrementalne kroki,
-- najpierw prosty working flow,
-- potem resilience i concurrency,
+- najpierw prosty działający flow, potem resilience i współbieżność,
 - review kodu po każdym etapie,
-- Java najpierw,
-- potem wybrane elementy przepisujemy / porównujemy z Kotlinem,
-- każdy mechanizm dokumentujemy: co, dlaczego, trade-off, failure scenario.
+- każdy mechanizm dokumentujemy: co, dlaczego, trade-off, scenariusz awarii,
+- dokumentacja opisuje stan faktyczny; plany są oznaczone jako niezaimplementowane.
+- plan (NIE ZAIMPLEMENTOWANE): Java najpierw, potem wybrane elementy porównać z implementacją w Kotlinie.
 
 ---
 
-## 27. Kluczowe zagadnienia inżynierskie
+## 25. Kluczowe zagadnienia inżynierskie
 
-Projekt obejmuje:
-
-1. Architekturę platformy migracyjnej.
-2. Batch + delta synchronization.
-3. Kafka topics / partitions / consumer groups.
-4. Idempotency i at-least-once delivery.
-5. Retry / DLQ / circuit breaker.
-6. Transakcje DB vs wywołania external API.
-7. Restartable migration.
-8. N+1, race conditions i transaction pitfalls.
+1. Architektura platformy migracyjnej.
+2. Batch + delta synchronization + reconciliation.
+3. Kafka: partycje, consumer groups, at-least-once, DLT.
+4. Idempotency i atomowe przejścia stanu w PostgreSQL.
+5. Leasy i fencing tokeny przy wielu workerach.
+6. Transakcje DB vs wywołania zewnętrznego API (brak transakcji rozproszonej).
+7. Restartowalna migracja z checkpointami.
+8. Retry / circuit breaker / klasyfikacja błędów.
 9. Multi-tenancy i bezpieczeństwo PII.
-10. Jakość implementacji weryfikowaną przez code review.
+10. Jakość implementacji weryfikowana testami i code review.
