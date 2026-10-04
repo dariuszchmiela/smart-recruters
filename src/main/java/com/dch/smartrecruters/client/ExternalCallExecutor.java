@@ -19,7 +19,8 @@ import java.util.function.Supplier;
  *     -> HTTP
  * </pre>
  * One business call counts as one circuit breaker outcome, regardless of how many retries it needed.
- * Every {@link RestClientException} is translated to {@link ExternalSystemException}.
+ * Every {@link RestClientException} is translated to a sanitized {@link ExternalSystemException}
+ * (no response body, no raw exception in the cause chain) - the single place where that happens.
  */
 public class ExternalCallExecutor {
 
@@ -71,8 +72,9 @@ public class ExternalCallExecutor {
             );
         } catch (CallNotPermittedException e) {
             // OPEN (or HALF_OPEN with no free trial slot): fail fast, no HTTP, no retry
-            log.warn("{} rejected: {}", operation, e.getMessage());
-            throw new ExternalSystemException(operation, FailureType.TRANSIENT, e);
+            ExternalSystemException rejected = ExternalSystemException.circuitOpen(operation, e);
+            log.warn("{}", rejected.getMessage());
+            throw rejected;
         }
     }
 
@@ -80,9 +82,11 @@ public class ExternalCallExecutor {
         try {
             return call.get();
         } catch (RestClientException e) {
-            FailureType failureType = HttpFailureClassifier.classify(e);
-            log.warn("{} failed with {} error: {}", operation, failureType, e.getMessage());
-            throw new ExternalSystemException(operation, failureType, e);
+            // never log or keep e itself: its message and cause may contain the remote response body
+            ExternalSystemException failure =
+                    ExternalSystemException.fromHttpClientFailure(operation, HttpFailureClassifier.classify(e), e);
+            log.warn("{}", failure.getMessage());
+            throw failure;
         }
     }
 }

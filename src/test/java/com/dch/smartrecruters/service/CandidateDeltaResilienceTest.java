@@ -21,13 +21,17 @@ import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -147,6 +151,29 @@ class CandidateDeltaResilienceTest {
 
         sap.verify();
         verify(events).markFailed(eq(event.eventId()), any(), anyString());
+    }
+
+    @Test
+    void shouldPersistAndPropagateOnlySanitizedErrorWhenTargetEchoesCandidateData() {
+        String sentinelEmail = "secret-person@example.com";
+        sap.expect(once(), requestTo(SAP_URL))
+                .andRespond(withSuccess(CANDIDATE_JSON, MediaType.APPLICATION_JSON));
+        smartRecruiters.expect(once(), requestTo(SR_URL))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"email\": \"" + sentinelEmail + "\", \"firstName\": \"SecretFirstName\"}"));
+
+        PermanentDeltaEventException thrown =
+                assertThrows(PermanentDeltaEventException.class, () -> service.process(event));
+
+        ArgumentCaptor<String> lastError = ArgumentCaptor.forClass(String.class);
+        verify(events).markFailed(eq(event.eventId()), any(), lastError.capture());
+        assertEquals("SmartRecruiters PUT candidate tenant-1:candidate-1 failed (PERMANENT, HTTP 400)", lastError.getValue());
+        // what the Kafka error handler logs and writes into the DLT exception headers
+        StringWriter trace = new StringWriter();
+        thrown.printStackTrace(new PrintWriter(trace));
+        assertFalse(trace.toString().contains(sentinelEmail));
+        assertFalse(trace.toString().contains("SecretFirstName"));
+        assertTrue(trace.toString().contains("HTTP 400"));
     }
 
     private static ExternalCallExecutor executor(CircuitBreaker circuitBreaker) {

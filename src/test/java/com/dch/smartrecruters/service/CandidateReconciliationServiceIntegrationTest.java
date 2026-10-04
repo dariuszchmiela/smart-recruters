@@ -21,6 +21,14 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import com.dch.smartrecruters.client.ExternalCallExecutor;
+import com.dch.smartrecruters.client.smartrecruiters.RestSmartRecruitersClient;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.client.ExpectedCount;
+import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.web.client.RestClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
@@ -43,6 +51,8 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -297,6 +307,27 @@ class CandidateReconciliationServiceIntegrationTest {
     }
 
     @Test
+    void shouldPersistOnlySanitizedErrorWhenTargetResponseEchoesCandidateData() {
+        sap.add(TENANT, "c1", "John", "Smith", "john@example.com");
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://sr.test");
+        MockRestServiceServer srServer = MockRestServiceServer.bindTo(builder).build();
+        srServer.expect(ExpectedCount.times(3), requestTo("http://sr.test/api/tenants/tenant-1/candidates?page=0&size=2"))
+                .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"email\": \"secret-person@example.com\", \"firstName\": \"SecretFirstName\"}"));
+        service = new CandidateReconciliationService(sap,
+                new RestSmartRecruitersClient(builder.build(),
+                        new ExternalCallExecutor(CircuitBreaker.ofDefaults("sr"), 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5))),
+                new CandidateMapper(), repository, PAGE_SIZE);
+
+        ReconciliationRun run = reconcile(TENANT);
+
+        assertEquals(ReconciliationRunStatus.FAILED, run.status());
+        // read back from PostgreSQL
+        assertEquals("SmartRecruiters GET candidates tenant-1 page 0 size 2 failed (TRANSIENT, HTTP 503)", run.lastError());
+        srServer.verify();
+    }
+
+    @Test
     void shouldMarkRunFailedWhenSourceScanFails() {
         sap.add(TENANT, "c1", "John", "Smith", "john@example.com");
         sap.failingPage = 0;
@@ -403,7 +434,7 @@ class CandidateReconciliationServiceIntegrationTest {
     }
 
     private static ExternalSystemException unavailable(String operation) {
-        return new ExternalSystemException(operation, FailureType.TRANSIENT, new ResourceAccessException("Read timed out"));
+        return ExternalSystemException.fromHttpClientFailure(operation, FailureType.TRANSIENT, new ResourceAccessException("Read timed out"));
     }
 
     /**

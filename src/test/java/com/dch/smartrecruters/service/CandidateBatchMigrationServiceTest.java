@@ -14,10 +14,18 @@ import com.dch.smartrecruters.state.MigrationStatus;
 import com.dch.smartrecruters.state.TenantMigrationJob;
 import com.dch.smartrecruters.state.TenantMigrationJobStatus;
 import com.dch.smartrecruters.validation.CandidateValidator;
+import com.dch.smartrecruters.client.ExternalCallExecutor;
+import com.dch.smartrecruters.client.sap.RestSapClient;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.web.client.RestClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.ResourceAccessException;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -34,6 +42,8 @@ import java.util.function.Consumer;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -265,6 +275,30 @@ class CandidateBatchMigrationServiceTest {
     }
 
     @Test
+    void shouldPersistOnlySanitizedErrorWhenSourcePageResponseEchoesCandidateData() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://sap.test");
+        MockRestServiceServer sapServer = MockRestServiceServer.bindTo(builder).build();
+        sapServer.expect(requestTo("http://sap.test/api/tenants/tenant-1/candidates?page=0&size=3"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"email\": \"secret-person@example.com\", \"firstName\": \"SecretFirstName\"}"));
+        SapClient realSap = new RestSapClient(builder.build(),
+                new ExternalCallExecutor(CircuitBreaker.ofDefaults("sap"), 3, Duration.ofMillis(1), 2.0, Duration.ofMillis(5)));
+        CandidateBatchMigrationService realSapService = new CandidateBatchMigrationService(
+                realSap,
+                new CandidateMigrationService(realSap, new CandidateMapper(), new CandidateValidator(), target, records),
+                jobs, PAGE_SIZE, PARALLELISM
+        );
+
+        TenantMigrationJob job = realSapService.startOrResume(TENANT);
+        realSapService.runJob(job.jobId());
+
+        TenantMigrationJob failed = jobs.get(job.jobId());
+        assertEquals(TenantMigrationJobStatus.FAILED, failed.status());
+        assertEquals("SAP GET candidates tenant-1 page 0 size 3 failed (PERMANENT, HTTP 400)", failed.lastError());
+        sapServer.verify();
+    }
+
+    @Test
     void shouldNotRunJobThatCannotBeClaimed() {
         sap.addCandidates(3);
         TenantMigrationJob job = service.startOrResume(TENANT);
@@ -358,7 +392,7 @@ class CandidateBatchMigrationServiceTest {
         public SapCandidatePage getCandidates(String tenantId, int page, int size) {
             requestedPages.add(page);
             if (page == failingPage) {
-                throw new ExternalSystemException(
+                throw ExternalSystemException.fromHttpClientFailure(
                         "SAP GET candidates", FailureType.TRANSIENT, new ResourceAccessException("Read timed out")
                 );
             }

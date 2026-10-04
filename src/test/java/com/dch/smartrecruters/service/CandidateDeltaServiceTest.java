@@ -225,7 +225,7 @@ class CandidateDeltaServiceTest {
 
     @Test
     void shouldTreatPermanentExternalFailureAsPermanent() {
-        sap.failNext(new ExternalSystemException(
+        sap.failNext(ExternalSystemException.fromHttpClientFailure(
                 "SAP GET candidate", FailureType.PERMANENT, new HttpClientErrorException(HttpStatus.NOT_FOUND)
         ));
         CandidateChangedEvent event = event(TENANT, CANDIDATE);
@@ -289,7 +289,7 @@ class CandidateDeltaServiceTest {
     }
 
     private static ExternalSystemException transientFailure() {
-        return new ExternalSystemException(
+        return ExternalSystemException.fromHttpClientFailure(
                 "SmartRecruiters PUT candidate", FailureType.TRANSIENT, new ResourceAccessException("Read timed out")
         );
     }

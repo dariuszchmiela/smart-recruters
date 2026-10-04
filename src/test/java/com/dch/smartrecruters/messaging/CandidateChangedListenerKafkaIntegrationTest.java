@@ -141,7 +141,7 @@ class CandidateChangedListenerKafkaIntegrationTest {
     void shouldRetryTransientFailureBoundedTimesThenDeadLetter() throws Exception {
         UUID eventId = UUID.randomUUID();
         String candidateId = "candidate-transient-" + eventId;
-        doThrow(new ExternalSystemException("SmartRecruiters PUT candidate", FailureType.TRANSIENT,
+        doThrow(ExternalSystemException.fromHttpClientFailure("SmartRecruiters PUT candidate", FailureType.TRANSIENT,
                 new ResourceAccessException("Read timed out")))
                 .when(deltaService).process(argThat(event -> event != null && candidateId.equals(event.candidateId())));
 
